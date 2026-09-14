@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Citizen Dashboard — SPSFRMS{% endblock %}
+{% block content %}
+<div class="dashboard-page"><div class="container py-5">
+    <div class="dashboard-hero"><div><span class="section-label">CITIZEN DASHBOARD</span><h1>Hello, {{ session.get('user_name') }} <span>👋</span></h1><p>View your complaints, follow progress and report a new issue.</p></div><a href="{{ url_for('submit_complaint') }}" class="btn btn-primary btn-lg"><i class="bi bi-plus-lg me-2"></i>Report an Issue</a></div>
+    <div class="row g-3 mt-2">
+        <div class="col-md-3"><div class="metric-card"><span class="metric-icon blue"><i class="bi bi-files"></i></span><div><small>Total</small><strong>{{ total }}</strong></div></div></div>
+        <div class="col-md-3"><div class="metric-card"><span class="metric-icon orange"><i class="bi bi-hourglass-split"></i></span><div><small>Submitted</small><strong>{{ submitted }}</strong></div></div></div>
+        <div class="col-md-3"><div class="metric-card"><span class="metric-icon purple"><i class="bi bi-arrow-repeat"></i></span><div><small>In Progress</small><strong>{{ in_progress }}</strong></div></div></div>
+        <div class="col-md-3"><div class="metric-card"><span class="metric-icon green"><i class="bi bi-check2-circle"></i></span><div><small>Resolved</small><strong>{{ resolved }}</strong></div></div></div>
+    </div>
+    <div class="content-card mt-4"><div class="card-header-modern"><div><h3>My Complaints</h3><p>Your latest complaint activity</p></div><span class="record-count">{{ total }} records</span></div>
+        <div class="table-responsive"><table class="table modern-table align-middle"><thead><tr><th>Complaint</th><th>Category</th><th>Priority</th><th>Date</th><th>Status</th><th></th></tr></thead><tbody>
+        {% for complaint in complaints %}<tr><td><b>CMP{{ "%03d"|format(complaint.id) }}</b><small>{{ complaint.location }}</small></td><td>{{ complaint.category }}</td><td><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></td><td>{{ complaint.created_date.strftime('%d %b %Y') }}</td><td><span class="status-badge {{ complaint.status|lower|replace(' ','-') }}">{{ complaint.status }}</span></td><td><a class="table-action" href="{{ url_for('track_complaint', complaint_id=complaint.id) }}">Track <i class="bi bi-arrow-up-right"></i></a></td></tr>
+        {% else %}<tr><td colspan="6"><div class="empty-state"><i class="bi bi-inbox"></i><h4>No complaints yet</h4><p>Your submitted complaints will appear here.</p><a href="{{ url_for('submit_complaint') }}" class="btn btn-primary">Submit your first complaint</a></div></td></tr>{% endfor %}
+        </tbody></table></div>
+    </div>
+</div></div>
+{% endblock %}

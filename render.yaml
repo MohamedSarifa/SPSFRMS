@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: spsfrms
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: spsfrms-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+
+databases:
+  - name: spsfrms-db

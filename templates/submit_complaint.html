@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Report an Issue — SPSFRMS{% endblock %}
+{% block content %}
+<div class="dashboard-page"><div class="container py-5">
+    <div class="page-title"><a href="{{ url_for('citizen_dashboard') }}" class="back-link"><i class="bi bi-arrow-left"></i> Dashboard</a><span class="section-label">NEW COMPLAINT</span><h1>Report a public issue</h1><p>Give enough detail for the responsible department to understand the problem.</p></div>
+    <div class="row g-4 mt-1">
+        <div class="col-lg-8"><div class="content-card form-card-modern"><form method="POST" enctype="multipart/form-data">
+            <div class="form-section"><div class="form-section-title"><span>01</span><div><h4>Issue details</h4><p>Describe what is happening.</p></div></div>
+                <label class="form-label">Complaint Category</label><select name="category" id="category" class="form-select" required><option value="">Select a category</option>{% for item in ['Road Damage','Garbage','Water Leakage','Street Light','Drainage','Electricity','Traffic','Fire','Other'] %}<option>{{ item }}</option>{% endfor %}</select>
+                <label class="form-label mt-3">Complaint Description</label><textarea name="complaint_text" id="complaintText" class="form-control" rows="7" placeholder="Example: There is a large pothole near the bus stop..." required></textarea>
+            </div>
+            <div class="form-section"><div class="form-section-title"><span>02</span><div><h4>Location</h4><p>Tell the responsible team where it is.</p></div></div>
+                <label class="form-label">Location / Area</label><div class="location-input"><input name="location" id="location" class="form-control" placeholder="Street, area or landmark" required><button type="button" class="btn btn-outline-primary" onclick="useLocation()"><i class="bi bi-crosshair me-1"></i> Use my location</button></div><small id="locationHelp" class="text-muted">You can type a landmark if you do not want to use device location.</small>
+            </div>
+            <div class="form-section"><div class="form-section-title"><span>03</span><div><h4>Photo evidence <em>optional</em></h4><p>Attach a JPG, JPEG or PNG image if useful.</p></div></div><input name="image" type="file" class="form-control" accept=".jpg,.jpeg,.png"><small class="text-muted">Maximum upload size: 10 MB.</small></div>
+            <div id="analysis" class="analysis-box d-none"><div class="analysis-head"><i class="bi bi-lightbulb"></i><div><b>Basic text check</b><small>Uses predefined keywords to suggest category and priority.</small></div></div><div class="analysis-grid"><div><small>Keywords</small><strong id="keywords">—</strong></div><div><small>Suggested category</small><strong id="suggested">—</strong></div><div><small>Priority</small><strong id="priority">—</strong></div></div></div>
+            <div class="form-actions"><button type="button" class="btn btn-outline-primary" onclick="previewAnalysis()"><i class="bi bi-search me-2"></i>Check details</button><button type="submit" class="btn btn-primary"><i class="bi bi-send me-2"></i>Submit complaint</button></div>
+        </form></div></div>
+        <div class="col-lg-4"><div class="side-info"><div class="side-icon"><i class="bi bi-shield-check"></i></div><h4>What happens next?</h4><div class="side-step"><span>1</span><div><b>Submitted</b><small>Your complaint is stored.</small></div></div><div class="side-step"><span>2</span><div><b>Department review</b><small>The responsible team sees it.</small></div></div><div class="side-step"><span>3</span><div><b>Status update</b><small>Progress is reflected in your dashboard.</small></div></div><div class="tip"><i class="bi bi-info-circle"></i> For urgent danger or emergencies, contact the appropriate emergency service directly.</div></div></div>
+    </div>
+</div></div>
+{% endblock %}

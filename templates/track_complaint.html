@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Track Complaint — SPSFRMS{% endblock %}
+{% block content %}
+<div class="dashboard-page"><div class="container py-5">
+    <div class="page-title"><a href="{{ url_for('citizen_dashboard') if session.get('role') == 'citizen' else url_for('officer_dashboard') if session.get('role') == 'officer' else url_for('admin_dashboard') }}" class="back-link"><i class="bi bi-arrow-left"></i> Back</a><span class="section-label">COMPLAINT TRACKING</span><h1>CMP{{ "%03d"|format(complaint.id) }}</h1><p>Follow the current response stage and complaint details.</p></div>
+    <div class="row g-4"><div class="col-lg-8"><div class="content-card tracking-card"><div class="tracking-summary"><div><small>Current status</small><h3>{{ complaint.status }}</h3></div><span class="status-badge {{ complaint.status|lower|replace(' ','-') }}">{{ complaint.status }}</span></div>
+        {% set states = ["Submitted", "Under Review", "In Progress", "Resolved"] %}{% set current_index = states.index(complaint.status) if complaint.status in states else 0 %}
+        <div class="progress-timeline">{% for state in states %}<div class="timeline-item {% if loop.index0 <= current_index %}done{% endif %} {% if loop.index0 == current_index %}current{% endif %}"><span class="timeline-dot">{% if loop.index0 < current_index %}<i class="bi bi-check"></i>{% else %}{{ loop.index }}{% endif %}</span><div><b>{{ state }}</b><small>{% if state == 'Submitted' %}Complaint received{% elif state == 'Under Review' %}Being reviewed by an officer{% elif state == 'In Progress' %}Action is being processed{% else %}Complaint marked as resolved{% endif %}</small></div></div>{% endfor %}</div>
+    </div></div>
+    <div class="col-lg-4"><div class="content-card detail-card"><h4>Complaint details</h4><div class="detail-row"><small>Category</small><b>{{ complaint.category }}</b></div><div class="detail-row"><small>Priority</small><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></div><div class="detail-row"><small>Location</small><b>{{ complaint.location }}</b></div><div class="detail-row"><small>Submitted</small><b>{{ complaint.created_date.strftime('%d %b %Y, %I:%M %p') }}</b></div><div class="detail-description"><small>Description</small><p>{{ complaint.complaint_text }}</p></div></div></div></div>
+</div></div>
+{% endblock %}
