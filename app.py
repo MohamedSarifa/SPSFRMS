@@ -11,26 +11,16 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# -------------------------------------------------
-# BASIC CONFIGURATION
-# -------------------------------------------------
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "spsfrms-local-secret-key")
 
-# PostgreSQL connection.
-# Local example:
-# postgresql://postgres:YOUR_PASSWORD@localhost:5432/spsfrms_db
-# Render: set DATABASE_URL in the Render Environment Variables.
 database_url = os.getenv("DATABASE_URL")
 if database_url:
-    # Some hosting services may provide postgres://. SQLAlchemy expects
-    # postgresql:// for the current PostgreSQL driver setup.
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
     if database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 else:
-    # Easy local PostgreSQL fallback. Change only the password if needed.
     app.config["SQLALCHEMY_DATABASE_URI"] = (
         "postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/spsfrms_db"
     )
@@ -39,7 +29,6 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["UPLOAD_FOLDER"] = "uploads"
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
-# Database
 
 db = SQLAlchemy(app)
 
@@ -51,9 +40,6 @@ CATEGORIES = [
 STATUSES = ["Submitted", "Under Review", "In Progress", "Resolved"]
 
 
-# -------------------------------------------------
-# DATABASE MODELS
-# -------------------------------------------------
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
@@ -91,9 +77,6 @@ class Complaint(db.Model):
     department = db.relationship("Department")
 
 
-# -------------------------------------------------
-# HELPERS
-# -------------------------------------------------
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -215,9 +198,6 @@ def create_demo_users():
             db.session.commit()
 
 
-# -------------------------------------------------
-# HOME
-# -------------------------------------------------
 @app.route("/")
 def home():
     demo_text = (
@@ -235,9 +215,6 @@ def home():
     return render_template("index.html", demo=demo, categories=CATEGORIES)
 
 
-# -------------------------------------------------
-# REGISTER
-# -------------------------------------------------
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
@@ -270,9 +247,6 @@ def register():
     return render_template("register.html")
 
 
-# -------------------------------------------------
-# LOGIN
-# -------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -305,9 +279,6 @@ def logout():
     return redirect(url_for("home"))
 
 
-# -------------------------------------------------
-# CITIZEN DASHBOARD
-# -------------------------------------------------
 @app.route("/citizen-dashboard")
 def citizen_dashboard():
     if not login_required() or session.get("role") != "citizen":
@@ -332,9 +303,6 @@ def citizen_dashboard():
     )
 
 
-# -------------------------------------------------
-# SUBMIT COMPLAINT
-# -------------------------------------------------
 @app.route("/submit-complaint", methods=["GET", "POST"])
 def submit_complaint():
     if not login_required() or session.get("role") != "citizen":
@@ -348,8 +316,6 @@ def submit_complaint():
             flash("Please describe the issue and provide a location.", "danger")
             return render_template("submit_complaint.html", form=request.form)
 
-        # Category, priority and department are always derived from the
-        # description; citizens never choose a category manually.
         keywords, final_category, priority = analyze_text(complaint_text)
 
         image_name = None
@@ -409,9 +375,6 @@ def analyze_preview():
     }
 
 
-# -------------------------------------------------
-# TRACK COMPLAINT
-# -------------------------------------------------
 @app.route("/track-complaint/<int:complaint_id>")
 def track_complaint(complaint_id):
     if not login_required():
@@ -426,9 +389,6 @@ def track_complaint(complaint_id):
     return render_template("track_complaint.html", complaint=complaint)
 
 
-# -------------------------------------------------
-# OFFICER DASHBOARD
-# -------------------------------------------------
 @app.route("/officer-dashboard")
 def officer_dashboard():
     if not login_required() or session.get("role") != "officer":
@@ -450,9 +410,6 @@ def officer_dashboard():
     )
 
 
-# -------------------------------------------------
-# UPDATE STATUS
-# -------------------------------------------------
 @app.route("/update-status/<int:complaint_id>", methods=["POST"])
 def update_status(complaint_id):
     if not login_required() or session.get("role") not in ["officer", "admin"]:
@@ -469,9 +426,6 @@ def update_status(complaint_id):
     return redirect_by_role()
 
 
-# -------------------------------------------------
-# ADMIN DASHBOARD
-# -------------------------------------------------
 @app.route("/admin-dashboard")
 def admin_dashboard():
     if not login_required() or session.get("role") != "admin":
@@ -499,9 +453,6 @@ def admin_dashboard():
     )
 
 
-# -------------------------------------------------
-# HEALTH CHECK
-# -------------------------------------------------
 @app.route("/health")
 def health():
     try:
@@ -511,9 +462,6 @@ def health():
         return {"status": "error", "database": "not connected", "message": str(error)}, 500
 
 
-# -------------------------------------------------
-# STARTUP
-# -------------------------------------------------
 with app.app_context():
     try:
         initialize_database()

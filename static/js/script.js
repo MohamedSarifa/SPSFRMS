@@ -1,7 +1,6 @@
 (function () {
     'use strict';
 
-    // System status indicator backed by the Flask /health route.
     function initHealthStatus() {
         const indicators = document.querySelectorAll('[data-health-status]');
         if (!indicators.length) return;
@@ -24,7 +23,6 @@
             .catch(() => setState('down', 'Status unavailable'));
     }
 
-    // Live preview of the server-side keyword analysis.
     function initComplaintAnalysis() {
         const textarea = document.getElementById('complaintText');
         if (!textarea || !textarea.dataset.analyzeUrl) return;
@@ -167,7 +165,29 @@
         });
     }
 
+    function initAmbientParallax() {
+        const bg = document.querySelector('.ambient-bg');
+        if (!bg) return;
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        if (!window.matchMedia('(pointer: fine)').matches) return;
+
+        let frame = 0;
+        let x = 0;
+        let y = 0;
+        window.addEventListener('pointermove', event => {
+            x = event.clientX / window.innerWidth - 0.5;
+            y = event.clientY / window.innerHeight - 0.5;
+            if (frame) return;
+            frame = requestAnimationFrame(() => {
+                bg.style.setProperty('--px', x.toFixed(3));
+                bg.style.setProperty('--py', y.toFixed(3));
+                frame = 0;
+            });
+        }, { passive: true });
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
+        initAmbientParallax();
         initHealthStatus();
         initComplaintAnalysis();
         initLocationButton();
