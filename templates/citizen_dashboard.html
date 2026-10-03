@@ -1,19 +1,62 @@
 {% extends "base.html" %}
-{% block title %}Citizen Dashboard — SPSFRMS{% endblock %}
+{% block title %}Dashboard — SPSFRMS{% endblock %}
 {% block content %}
-<div class="dashboard-page"><div class="container py-5">
-    <div class="dashboard-hero"><div><span class="section-label">CITIZEN DASHBOARD</span><h1>Hello, {{ session.get('user_name') }} <span>👋</span></h1><p>View your complaints, follow progress and report a new issue.</p></div><a href="{{ url_for('submit_complaint') }}" class="btn btn-primary btn-lg"><i class="bi bi-plus-lg me-2"></i>Report an Issue</a></div>
-    <div class="row g-3 mt-2">
-        <div class="col-md-3"><div class="metric-card"><span class="metric-icon blue"><i class="bi bi-files"></i></span><div><small>Total</small><strong>{{ total }}</strong></div></div></div>
-        <div class="col-md-3"><div class="metric-card"><span class="metric-icon orange"><i class="bi bi-hourglass-split"></i></span><div><small>Submitted</small><strong>{{ submitted }}</strong></div></div></div>
-        <div class="col-md-3"><div class="metric-card"><span class="metric-icon purple"><i class="bi bi-arrow-repeat"></i></span><div><small>In Progress</small><strong>{{ in_progress }}</strong></div></div></div>
-        <div class="col-md-3"><div class="metric-card"><span class="metric-icon green"><i class="bi bi-check2-circle"></i></span><div><small>Resolved</small><strong>{{ resolved }}</strong></div></div></div>
+<div class="page">
+    <div class="container">
+        <header class="page-head">
+            <div>
+                <span class="eyebrow mono">// citizen dashboard</span>
+                <h1>Hello, {{ session.get('user_name') }}</h1>
+                <p>View your complaints, follow progress and report a new issue.</p>
+            </div>
+            <a href="{{ url_for('submit_complaint') }}" class="btn btn-accent"><i class="bi bi-plus-lg me-2" aria-hidden="true"></i>Report an Issue</a>
+        </header>
+
+        <div class="metrics">
+            <div class="metric"><span class="metric-label">Total</span><strong>{{ total }}</strong><i class="bi bi-files" aria-hidden="true"></i></div>
+            <div class="metric"><span class="metric-label">Submitted</span><strong>{{ submitted }}</strong><i class="bi bi-inbox" aria-hidden="true"></i></div>
+            <div class="metric accent-blue"><span class="metric-label">In progress</span><strong>{{ in_progress }}</strong><i class="bi bi-arrow-repeat" aria-hidden="true"></i></div>
+            <div class="metric accent-green"><span class="metric-label">Resolved</span><strong>{{ resolved }}</strong><i class="bi bi-check2-circle" aria-hidden="true"></i></div>
+        </div>
+
+        <section class="panel mt-4" aria-labelledby="myComplaints">
+            <div class="panel-head">
+                <div>
+                    <h2 id="myComplaints">My complaints</h2>
+                    <p>Your latest complaint activity</p>
+                </div>
+                <span class="count-chip mono">{{ total }} records</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table data-table align-middle mb-0">
+                    <thead>
+                        <tr><th scope="col">Complaint</th><th scope="col">Category</th><th scope="col">Department</th><th scope="col">Priority</th><th scope="col">Date</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                    </thead>
+                    <tbody>
+                    {% for complaint in complaints %}
+                        <tr>
+                            <td><span class="cmp-id mono">CMP{{ "%03d"|format(complaint.id) }}</span><small class="cell-sub">{{ complaint.location }}</small></td>
+                            <td>{{ complaint.category }}</td>
+                            <td class="text-muted-2">{{ complaint.department.name ~ ' Department' if complaint.department else 'Unassigned' }}</td>
+                            <td><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></td>
+                            <td class="mono text-muted-2">{{ complaint.created_date.strftime('%d %b %Y') }}</td>
+                            <td><span class="status-badge {{ complaint.status|lower|replace(' ','-') }}">{{ complaint.status }}</span></td>
+                            <td class="text-end"><a class="row-action" href="{{ url_for('track_complaint', complaint_id=complaint.id) }}">Track <i class="bi bi-arrow-up-right" aria-hidden="true"></i></a></td>
+                        </tr>
+                    {% else %}
+                        <tr><td colspan="7">
+                            <div class="empty-state">
+                                <i class="bi bi-inbox" aria-hidden="true"></i>
+                                <h3>No complaints yet</h3>
+                                <p>Your submitted complaints will appear here.</p>
+                                <a href="{{ url_for('submit_complaint') }}" class="btn btn-accent btn-sm">Submit your first complaint</a>
+                            </div>
+                        </td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
     </div>
-    <div class="content-card mt-4"><div class="card-header-modern"><div><h3>My Complaints</h3><p>Your latest complaint activity</p></div><span class="record-count">{{ total }} records</span></div>
-        <div class="table-responsive"><table class="table modern-table align-middle"><thead><tr><th>Complaint</th><th>Category</th><th>Priority</th><th>Date</th><th>Status</th><th></th></tr></thead><tbody>
-        {% for complaint in complaints %}<tr><td><b>CMP{{ "%03d"|format(complaint.id) }}</b><small>{{ complaint.location }}</small></td><td>{{ complaint.category }}</td><td><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></td><td>{{ complaint.created_date.strftime('%d %b %Y') }}</td><td><span class="status-badge {{ complaint.status|lower|replace(' ','-') }}">{{ complaint.status }}</span></td><td><a class="table-action" href="{{ url_for('track_complaint', complaint_id=complaint.id) }}">Track <i class="bi bi-arrow-up-right"></i></a></td></tr>
-        {% else %}<tr><td colspan="6"><div class="empty-state"><i class="bi bi-inbox"></i><h4>No complaints yet</h4><p>Your submitted complaints will appear here.</p><a href="{{ url_for('submit_complaint') }}" class="btn btn-primary">Submit your first complaint</a></div></td></tr>{% endfor %}
-        </tbody></table></div>
-    </div>
-</div></div>
+</div>
 {% endblock %}

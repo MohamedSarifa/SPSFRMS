@@ -1,11 +1,76 @@
 {% extends "base.html" %}
 {% block title %}Admin Panel — SPSFRMS{% endblock %}
 {% block content %}
-<div class="dashboard-page"><div class="container py-5">
-    <div class="dashboard-hero"><div><span class="section-label">ADMINISTRATION</span><h1>System overview</h1><p>Monitor users, departments and complaint activity.</p></div><span class="role-chip"><i class="bi bi-shield-lock"></i> Administrator</span></div>
-    <div class="row g-3 mt-2"><div class="col-md-3"><div class="metric-card"><span class="metric-icon blue"><i class="bi bi-people"></i></span><div><small>Total Users</small><strong>{{ users }}</strong></div></div></div><div class="col-md-3"><div class="metric-card"><span class="metric-icon purple"><i class="bi bi-person-badge"></i></span><div><small>Officers</small><strong>{{ officers }}</strong></div></div></div><div class="col-md-3"><div class="metric-card"><span class="metric-icon orange"><i class="bi bi-building"></i></span><div><small>Departments</small><strong>{{ departments }}</strong></div></div></div><div class="col-md-3"><div class="metric-card"><span class="metric-icon green"><i class="bi bi-files"></i></span><div><small>Complaints</small><strong>{{ complaints }}</strong></div></div></div></div>
-    <div class="row g-4 mt-1"><div class="col-lg-8"><div class="content-card"><div class="card-header-modern"><div><h3>Recent complaints</h3><p>Latest activity across the system.</p></div></div><div class="table-responsive"><table class="table modern-table align-middle"><thead><tr><th>Complaint</th><th>Citizen</th><th>Category</th><th>Priority</th><th>Status</th></tr></thead><tbody>{% for c in recent_complaints %}<tr><td><a class="complaint-link" href="{{ url_for('track_complaint', complaint_id=c.id) }}">CMP{{ "%03d"|format(c.id) }}</a></td><td>{{ c.citizen.name }}</td><td>{{ c.category }}</td><td><span class="priority {{ c.priority|lower }}">{{ c.priority }}</span></td><td><span class="status-badge {{ c.status|lower|replace(' ','-') }}">{{ c.status }}</span></td></tr>{% else %}<tr><td colspan="5" class="text-center py-5">No complaint activity yet.</td></tr>{% endfor %}</tbody></table></div></div></div>
-        <div class="col-lg-4"><div class="content-card summary-panel"><h4>Response summary</h4><div class="summary-number">{{ resolved }}</div><p>complaints resolved</p><div class="summary-progress"><div style="width: {% if complaints %}{{ (resolved / complaints * 100)|round|int }}{% else %}0{% endif %}%"></div></div><div class="d-flex justify-content-between mt-2"><small>Resolved</small><small>{{ resolved }}/{{ complaints }}</small></div><hr><div class="admin-mini"><span class="metric-icon blue"><i class="bi bi-person"></i></span><div><b>{{ citizens }}</b><small>Citizen accounts</small></div></div><div class="admin-mini"><span class="metric-icon orange"><i class="bi bi-hourglass"></i></span><div><b>{{ pending }}</b><small>Open complaints</small></div></div></div></div>
+{% set resolved_pct = ((resolved / complaints * 100)|round|int) if complaints else 0 %}
+<div class="page">
+    <div class="container">
+        <header class="page-head">
+            <div>
+                <span class="eyebrow mono">// administration</span>
+                <h1>System overview</h1>
+                <p>Monitor users, departments and complaint activity.</p>
+            </div>
+            <span class="role-chip mono"><i class="bi bi-shield-lock" aria-hidden="true"></i> administrator</span>
+        </header>
+
+        <div class="metrics">
+            <div class="metric"><span class="metric-label">Total users</span><strong>{{ users }}</strong><i class="bi bi-people" aria-hidden="true"></i></div>
+            <div class="metric"><span class="metric-label">Officers</span><strong>{{ officers }}</strong><i class="bi bi-person-badge" aria-hidden="true"></i></div>
+            <div class="metric"><span class="metric-label">Departments</span><strong>{{ departments }}</strong><i class="bi bi-building" aria-hidden="true"></i></div>
+            <div class="metric accent-blue"><span class="metric-label">Complaints</span><strong>{{ complaints }}</strong><i class="bi bi-files" aria-hidden="true"></i></div>
+        </div>
+
+        <div class="row g-4 mt-0">
+            <div class="col-lg-8">
+                <section class="panel h-100" aria-labelledby="recentTitle">
+                    <div class="panel-head">
+                        <div>
+                            <h2 id="recentTitle">Recent complaints</h2>
+                            <p>Latest activity across the system.</p>
+                        </div>
+                        <span class="count-chip mono">last {{ recent_complaints|length }}</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table data-table align-middle mb-0">
+                            <thead>
+                                <tr><th scope="col">Complaint</th><th scope="col">Citizen</th><th scope="col">Category</th><th scope="col">Priority</th><th scope="col">Status</th></tr>
+                            </thead>
+                            <tbody>
+                            {% for c in recent_complaints %}
+                                <tr>
+                                    <td><a class="cmp-id mono" href="{{ url_for('track_complaint', complaint_id=c.id) }}">CMP{{ "%03d"|format(c.id) }}</a><small class="cell-sub mono">{{ c.created_date.strftime('%d %b %Y') }}</small></td>
+                                    <td>{{ c.citizen.name }}</td>
+                                    <td>{{ c.category }}</td>
+                                    <td><span class="priority {{ c.priority|lower }}">{{ c.priority }}</span></td>
+                                    <td><span class="status-badge {{ c.status|lower|replace(' ','-') }}">{{ c.status }}</span></td>
+                                </tr>
+                            {% else %}
+                                <tr><td colspan="5"><div class="empty-state"><i class="bi bi-activity" aria-hidden="true"></i><h3>No activity yet</h3><p>Complaints will appear here once citizens start reporting.</p></div></td></tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <div class="col-lg-4">
+                <section class="panel p-4 h-100" aria-labelledby="summaryTitle">
+                    <h2 id="summaryTitle" class="panel-title">Response summary</h2>
+                    <div class="summary-number"><span class="text-gradient">{{ resolved_pct }}%</span></div>
+                    <p class="text-muted-2 mb-3">of complaints resolved</p>
+                    <div class="progress-track" role="progressbar" aria-valuenow="{{ resolved_pct }}" aria-valuemin="0" aria-valuemax="100" aria-label="Resolved complaints"><span style="width: {{ resolved_pct }}%"></span></div>
+                    <div class="d-flex justify-content-between mt-2 small mono text-muted-2"><span>resolved</span><span>{{ resolved }}/{{ complaints }}</span></div>
+
+                    <hr class="divider">
+
+                    <ul class="summary-list">
+                        <li><span class="summary-icon" aria-hidden="true"><i class="bi bi-person"></i></span><div><b>{{ citizens }}</b><small>Citizen accounts</small></div></li>
+                        <li><span class="summary-icon orange" aria-hidden="true"><i class="bi bi-hourglass-split"></i></span><div><b>{{ pending }}</b><small>Open complaints</small></div></li>
+                        <li><span class="summary-icon green" aria-hidden="true"><i class="bi bi-check2-circle"></i></span><div><b>{{ resolved }}</b><small>Resolved complaints</small></div></li>
+                    </ul>
+                </section>
+            </div>
+        </div>
     </div>
-</div></div>
+</div>
 {% endblock %}

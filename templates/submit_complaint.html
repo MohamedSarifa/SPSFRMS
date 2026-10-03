@@ -1,22 +1,86 @@
 {% extends "base.html" %}
 {% block title %}Report an Issue — SPSFRMS{% endblock %}
 {% block content %}
-<div class="dashboard-page"><div class="container py-5">
-    <div class="page-title"><a href="{{ url_for('citizen_dashboard') }}" class="back-link"><i class="bi bi-arrow-left"></i> Dashboard</a><span class="section-label">NEW COMPLAINT</span><h1>Report a public issue</h1><p>Give enough detail for the responsible department to understand the problem.</p></div>
-    <div class="row g-4 mt-1">
-        <div class="col-lg-8"><div class="content-card form-card-modern"><form method="POST" enctype="multipart/form-data">
-            <div class="form-section"><div class="form-section-title"><span>01</span><div><h4>Issue details</h4><p>Describe what is happening.</p></div></div>
-                <label class="form-label">Complaint Category</label><select name="category" id="category" class="form-select" required><option value="">Select a category</option>{% for item in ['Road Damage','Garbage','Water Leakage','Street Light','Drainage','Electricity','Traffic','Fire','Other'] %}<option>{{ item }}</option>{% endfor %}</select>
-                <label class="form-label mt-3">Complaint Description</label><textarea name="complaint_text" id="complaintText" class="form-control" rows="7" placeholder="Example: There is a large pothole near the bus stop..." required></textarea>
+<div class="page">
+    <div class="container">
+        <header class="page-head">
+            <div>
+                <a href="{{ url_for('citizen_dashboard') }}" class="back-link"><i class="bi bi-arrow-left" aria-hidden="true"></i> Dashboard</a>
+                <span class="eyebrow mono">// new complaint</span>
+                <h1>Report a public issue</h1>
+                <p>Describe the problem in your own words. Category, priority and department are determined automatically.</p>
             </div>
-            <div class="form-section"><div class="form-section-title"><span>02</span><div><h4>Location</h4><p>Tell the responsible team where it is.</p></div></div>
-                <label class="form-label">Location / Area</label><div class="location-input"><input name="location" id="location" class="form-control" placeholder="Street, area or landmark" required><button type="button" class="btn btn-outline-primary" onclick="useLocation()"><i class="bi bi-crosshair me-1"></i> Use my location</button></div><small id="locationHelp" class="text-muted">You can type a landmark if you do not want to use device location.</small>
+        </header>
+
+        <div class="row g-4">
+            <div class="col-lg-8">
+                <form method="POST" enctype="multipart/form-data" class="panel form-panel" id="complaintForm">
+                    <div class="form-block">
+                        <div class="form-block-head"><span class="mono">01</span><div><h2>What is happening?</h2><p>Be specific — mention what, how severe, and who is affected.</p></div></div>
+                        <label class="form-label" for="complaintText">Complaint description</label>
+                        <textarea name="complaint_text" id="complaintText" class="form-control" rows="6" maxlength="5000"
+                            placeholder="Example: There is a large pothole near the college entrance and vehicles are having difficulty passing."
+                            data-analyze-url="{{ url_for('analyze_preview') }}" required>{{ form.get('complaint_text', '') }}</textarea>
+                    </div>
+
+                    <div class="form-block">
+                        <div class="form-block-head"><span class="mono">02</span><div><h2>Where is it?</h2><p>Tell the responsible team where to find it.</p></div></div>
+                        <label class="form-label" for="location">Location / area</label>
+                        <div class="location-input">
+                            <div class="input-icon flex-grow-1">
+                                <i class="bi bi-geo-alt" aria-hidden="true"></i>
+                                <input name="location" id="location" class="form-control" placeholder="Street, area or landmark" value="{{ form.get('location', '') }}" required>
+                            </div>
+                            <button type="button" class="btn btn-ghost" id="useLocationBtn"><i class="bi bi-crosshair me-1" aria-hidden="true"></i> Use my location</button>
+                        </div>
+                        <small id="locationHelp" class="form-hint" aria-live="polite">You can type a landmark if you do not want to use device location.</small>
+                    </div>
+
+                    <div class="form-block">
+                        <div class="form-block-head"><span class="mono">03</span><div><h2>Photo evidence <em>optional</em></h2><p>Attach a JPG, JPEG or PNG image (max 10 MB).</p></div></div>
+                        <label class="dropzone" for="imageInput">
+                            <i class="bi bi-cloud-arrow-up" aria-hidden="true"></i>
+                            <span id="imageLabel"><b>Choose an image</b> or drag it here</span>
+                            <input name="image" id="imageInput" type="file" accept=".jpg,.jpeg,.png" class="visually-hidden">
+                        </label>
+                    </div>
+
+                    <div class="form-actions">
+                        <span class="form-hint"><i class="bi bi-lock me-1" aria-hidden="true"></i>Submitted securely to SPSFRMS</span>
+                        <button type="submit" class="btn btn-accent"><i class="bi bi-send me-2" aria-hidden="true"></i>Submit complaint</button>
+                    </div>
+                </form>
             </div>
-            <div class="form-section"><div class="form-section-title"><span>03</span><div><h4>Photo evidence <em>optional</em></h4><p>Attach a JPG, JPEG or PNG image if useful.</p></div></div><input name="image" type="file" class="form-control" accept=".jpg,.jpeg,.png"><small class="text-muted">Maximum upload size: 10 MB.</small></div>
-            <div id="analysis" class="analysis-box d-none"><div class="analysis-head"><i class="bi bi-lightbulb"></i><div><b>Basic text check</b><small>Uses predefined keywords to suggest category and priority.</small></div></div><div class="analysis-grid"><div><small>Keywords</small><strong id="keywords">—</strong></div><div><small>Suggested category</small><strong id="suggested">—</strong></div><div><small>Priority</small><strong id="priority">—</strong></div></div></div>
-            <div class="form-actions"><button type="button" class="btn btn-outline-primary" onclick="previewAnalysis()"><i class="bi bi-search me-2"></i>Check details</button><button type="submit" class="btn btn-primary"><i class="bi bi-send me-2"></i>Submit complaint</button></div>
-        </form></div></div>
-        <div class="col-lg-4"><div class="side-info"><div class="side-icon"><i class="bi bi-shield-check"></i></div><h4>What happens next?</h4><div class="side-step"><span>1</span><div><b>Submitted</b><small>Your complaint is stored.</small></div></div><div class="side-step"><span>2</span><div><b>Department review</b><small>The responsible team sees it.</small></div></div><div class="side-step"><span>3</span><div><b>Status update</b><small>Progress is reflected in your dashboard.</small></div></div><div class="tip"><i class="bi bi-info-circle"></i> For urgent danger or emergencies, contact the appropriate emergency service directly.</div></div></div>
+
+            <div class="col-lg-4">
+                <aside class="analysis-card sticky-lg" aria-labelledby="analysisTitle">
+                    <div class="analysis-head">
+                        <span class="analysis-icon" aria-hidden="true"><i class="bi bi-cpu"></i></span>
+                        <div>
+                            <h2 id="analysisTitle">Automatic analysis</h2>
+                            <small class="mono" id="analysisState">waiting for description</small>
+                        </div>
+                    </div>
+                    <dl class="analysis-list" aria-live="polite">
+                        <div><dt>Category</dt><dd id="resultCategory">—</dd></div>
+                        <div><dt>Priority</dt><dd id="resultPriority">—</dd></div>
+                        <div><dt>Department</dt><dd id="resultDepartment">—</dd></div>
+                        <div class="full"><dt>Matched keywords</dt><dd id="resultKeywords" class="keyword-list">—</dd></div>
+                    </dl>
+                    <p class="analysis-note">This preview uses the same keyword rules the server applies when you submit. You do not need to pick a category.</p>
+
+                    <div class="next-steps">
+                        <h3>What happens next</h3>
+                        <ol>
+                            <li><b>Submitted</b><small>Your complaint is stored and routed.</small></li>
+                            <li><b>Department review</b><small>The responsible team sees it.</small></li>
+                            <li><b>Status updates</b><small>Progress appears on your dashboard.</small></li>
+                        </ol>
+                    </div>
+                    <div class="tip"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i> For immediate danger, contact emergency services directly.</div>
+                </aside>
+            </div>
+        </div>
     </div>
-</div></div>
+</div>
 {% endblock %}

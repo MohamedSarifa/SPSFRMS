@@ -5,6 +5,7 @@ from werkzeug.utils import secure_filename
 from datetime import datetime
 from dotenv import load_dotenv
 import os
+import re
 
 load_dotenv()
 
@@ -97,41 +98,63 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+KEYWORD_GROUPS = {
+    "Road Damage": ["road", "pothole", "crack", "broken road", "footpath", "pavement", "speed breaker"],
+    "Garbage": ["garbage", "waste", "trash", "dump", "litter", "rubbish"],
+    "Water Leakage": ["water", "leak", "pipe", "leakage", "tap"],
+    "Street Light": ["street light", "streetlight", "lamp", "light"],
+    "Drainage": ["drain", "drainage", "sewage", "sewer", "manhole", "waterlogging"],
+    "Electricity": ["electricity", "electric", "power", "wire", "current", "transformer"],
+    "Traffic": ["traffic", "signal", "vehicle", "jam", "congestion"],
+    "Fire": ["fire", "smoke", "burning", "flame"],
+}
+
+HIGH_PRIORITY_WORDS = [
+    "fire", "accident", "danger", "emergency", "injury", "injured",
+    "electric shock", "live wire", "collapse", "explosion", "gas leak",
+]
+MEDIUM_PRIORITY_WORDS = [
+    "broken", "leak", "blocked", "damage", "traffic", "pothole", "overflow",
+    "difficulty", "unsafe", "large", "sewage", "not working",
+]
+
+
+def contains_word(text, word):
+    """Match a keyword at a word start so 'road' does not match 'broad'."""
+    return re.search(r"\b" + re.escape(word), text) is not None
+
+
 def analyze_text(text):
-    """Simple predefined-keyword analysis; no AI model is used."""
-    text = text.lower()
-    keyword_groups = {
-        "Road Damage": ["road", "pothole", "damage", "broken road"],
-        "Garbage": ["garbage", "waste", "trash", "dump"],
-        "Water Leakage": ["water", "leak", "pipe", "leakage"],
-        "Street Light": ["street light", "lamp", "light"],
-        "Drainage": ["drain", "drainage", "sewage"],
-        "Electricity": ["electricity", "power", "wire", "current"],
-        "Traffic": ["traffic", "signal", "vehicle", "jam"],
-        "Fire": ["fire", "smoke", "burning"],
-    }
+    """Simple predefined-keyword analysis; no AI model is used.
+
+    The category with the most keyword matches wins; ties go to the
+    category listed first in KEYWORD_GROUPS.
+    """
+    text = (text or "").lower()
 
     found_keywords = []
-    suggested_category = "Other"
+    best_category = "Other"
+    best_score = 0
 
-    for category, words in keyword_groups.items():
-        for word in words:
-            if word in text:
-                found_keywords.append(word)
-                if suggested_category == "Other":
-                    suggested_category = category
+    for category, words in KEYWORD_GROUPS.items():
+        matches = [word for word in words if contains_word(text, word)]
+        found_keywords.extend(matches)
+        if len(matches) > best_score:
+            best_category = category
+            best_score = len(matches)
 
-    high_words = ["fire", "accident", "danger", "emergency", "injury", "electric shock"]
-    medium_words = ["broken", "leak", "blocked", "damage", "traffic"]
-
-    if any(word in text for word in high_words):
+    if any(contains_word(text, word) for word in HIGH_PRIORITY_WORDS):
         priority = "High"
-    elif any(word in text for word in medium_words):
+    elif any(contains_word(text, word) for word in MEDIUM_PRIORITY_WORDS):
         priority = "Medium"
     else:
         priority = "Low"
 
-    return list(dict.fromkeys(found_keywords)), suggested_category, priority
+    return list(dict.fromkeys(found_keywords)), best_category, priority
+
+
+def department_label(category):
+    return f"{category} Department"
 
 
 def login_required():
@@ -197,7 +220,19 @@ def create_demo_users():
 # -------------------------------------------------
 @app.route("/")
 def home():
-    return render_template("index.html")
+    demo_text = (
+        "There is a large pothole near the college entrance and "
+        "vehicles are having difficulty passing."
+    )
+    keywords, category, priority = analyze_text(demo_text)
+    demo = {
+        "text": demo_text,
+        "keywords": keywords,
+        "category": category,
+        "priority": priority,
+        "department": department_label(category),
+    }
+    return render_template("index.html", demo=demo, categories=CATEGORIES)
 
 
 # -------------------------------------------------
@@ -306,23 +341,23 @@ def submit_complaint():
         return redirect(url_for("login"))
 
     if request.method == "POST":
-        category = request.form.get("category", "").strip()
         complaint_text = request.form.get("complaint_text", "").strip()
         location = request.form.get("location", "").strip()
 
-        if not category or not complaint_text or not location:
-            flash("Please fill all required complaint fields.", "danger")
-            return render_template("submit_complaint.html")
+        if not complaint_text or not location:
+            flash("Please describe the issue and provide a location.", "danger")
+            return render_template("submit_complaint.html", form=request.form)
 
-        keywords, suggested_category, priority = analyze_text(complaint_text)
-        final_category = suggested_category if category == "Other" and suggested_category != "Other" else category
+        # Category, priority and department are always derived from the
+        # description; citizens never choose a category manually.
+        keywords, final_category, priority = analyze_text(complaint_text)
 
         image_name = None
         file = request.files.get("image")
         if file and file.filename:
             if not allowed_file(file.filename):
                 flash("Only JPG, JPEG and PNG images are allowed.", "danger")
-                return render_template("submit_complaint.html")
+                return render_template("submit_complaint.html", form=request.form)
 
             image_name = secure_filename(file.filename)
             name, extension = os.path.splitext(image_name)
@@ -347,10 +382,31 @@ def submit_complaint():
         db.session.add(complaint)
         db.session.commit()
 
-        flash(f"Complaint CMP{complaint.id:03d} submitted successfully. Priority: {priority}.", "success")
+        flash(
+            f"Complaint CMP{complaint.id:03d} submitted. Category: {final_category} · "
+            f"Priority: {priority} · Routed to {department_label(final_category)}.",
+            "success",
+        )
         return redirect(url_for("citizen_dashboard"))
 
-    return render_template("submit_complaint.html")
+    return render_template("submit_complaint.html", form={})
+
+
+@app.route("/analyze-preview", methods=["POST"])
+def analyze_preview():
+    """Live preview of the same keyword analysis used on submission."""
+    if not login_required() or session.get("role") != "citizen":
+        return {"error": "unauthorized"}, 401
+
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", ""))[:5000]
+    keywords, category, priority = analyze_text(text)
+    return {
+        "keywords": keywords,
+        "category": category,
+        "priority": priority,
+        "department": department_label(category),
+    }
 
 
 # -------------------------------------------------

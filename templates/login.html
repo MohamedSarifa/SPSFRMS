@@ -1,17 +1,65 @@
 {% extends "base.html" %}
-{% block title %}Login — SPSFRMS{% endblock %}
+{% block title %}Sign in — SPSFRMS{% endblock %}
 {% block content %}
-<div class="auth-page"><div class="container"><div class="row justify-content-center"><div class="col-lg-10"><div class="auth-shell">
-    <div class="auth-intro"><span class="section-label light">WELCOME BACK</span><h1>Keep track of the issues you reported.</h1><p>Sign in to submit complaints, view updates and follow your complaint history.</p><div class="auth-points"><span><i class="bi bi-shield-check"></i> Secure password storage</span><span><i class="bi bi-clock-history"></i> Status history</span><span><i class="bi bi-people"></i> Citizen & officer roles</span></div></div>
-    <div class="auth-form"><div class="form-heading"><span class="mini-brand"><i class="bi bi-shield-check"></i></span><h2>Sign in</h2><p>Enter your account details below.</p></div>
-    <form method="POST">
-        <label class="form-label">Email</label><div class="input-icon"><i class="bi bi-envelope"></i><input name="email" type="email" class="form-control" placeholder="you@example.com" required></div>
-        <label class="form-label mt-3">Password</label><div class="input-icon"><i class="bi bi-lock"></i><input name="password" type="password" class="form-control" placeholder="Enter password" required></div>
-        <label class="form-label mt-3">Login as</label><select name="role" class="form-select"><option value="citizen">Citizen</option><option value="officer">Officer</option><option value="admin">Administrator</option></select>
-        <button class="btn btn-primary w-100 mt-4 py-3">Sign in <i class="bi bi-arrow-right ms-2"></i></button>
-    </form>
-    <p class="auth-switch">New citizen? <a href="{{ url_for('register') }}">Create an account</a></p>
-    <div class="demo-box"><b>Demo accounts</b><small>Officer: officer@spsfrms.com / officer123<br>Admin: admin@spsfrms.com / admin123</small></div>
+<div class="auth-page">
+    <div class="hero-grid" aria-hidden="true"></div>
+    <div class="container position-relative">
+        <div class="auth-shell">
+            <aside class="auth-intro">
+                <span class="eyebrow mono">// welcome back</span>
+                <h1>Keep track of the issues you reported.</h1>
+                <p>Sign in to submit complaints, view updates and follow your complaint history.</p>
+                <ul class="auth-points">
+                    <li><i class="bi bi-shield-check" aria-hidden="true"></i> Hashed password storage</li>
+                    <li><i class="bi bi-clock-history" aria-hidden="true"></i> Full status history</li>
+                    <li><i class="bi bi-people" aria-hidden="true"></i> Citizen, officer &amp; admin roles</li>
+                </ul>
+            </aside>
+
+            <div class="auth-card">
+                <div class="form-heading">
+                    <span class="brand-mark" aria-hidden="true"><i class="bi bi-shield-check"></i></span>
+                    <h2>Sign in</h2>
+                    <p>Enter your account details below.</p>
+                </div>
+
+                <form method="POST" novalidate>
+                    <fieldset class="mb-3">
+                        <legend class="form-label">Sign in as</legend>
+                        <div class="segmented" role="radiogroup">
+                            <input type="radio" class="btn-check" name="role" id="roleCitizen" value="citizen" checked>
+                            <label for="roleCitizen"><i class="bi bi-person" aria-hidden="true"></i> Citizen</label>
+                            <input type="radio" class="btn-check" name="role" id="roleOfficer" value="officer">
+                            <label for="roleOfficer"><i class="bi bi-person-badge" aria-hidden="true"></i> Officer</label>
+                            <input type="radio" class="btn-check" name="role" id="roleAdmin" value="admin">
+                            <label for="roleAdmin"><i class="bi bi-shield-lock" aria-hidden="true"></i> Admin</label>
+                        </div>
+                    </fieldset>
+
+                    <label class="form-label" for="email">Email</label>
+                    <div class="input-icon">
+                        <i class="bi bi-envelope" aria-hidden="true"></i>
+                        <input id="email" name="email" type="email" class="form-control" placeholder="you@example.com" autocomplete="email" required>
+                    </div>
+
+                    <label class="form-label mt-3" for="password">Password</label>
+                    <div class="input-icon">
+                        <i class="bi bi-lock" aria-hidden="true"></i>
+                        <input id="password" name="password" type="password" class="form-control" placeholder="Enter password" autocomplete="current-password" required>
+                    </div>
+
+                    <button type="submit" class="btn btn-accent w-100 mt-4 btn-lg">Sign in <i class="bi bi-arrow-right ms-2" aria-hidden="true"></i></button>
+                </form>
+
+                <p class="auth-switch">New citizen? <a href="{{ url_for('register') }}">Create an account</a></p>
+
+                <div class="demo-box mono">
+                    <span class="demo-title"><i class="bi bi-terminal" aria-hidden="true"></i> demo accounts</span>
+                    <span>officer@spsfrms.com <em>/</em> officer123</span>
+                    <span>admin@spsfrms.com <em>/</em> admin123</span>
+                </div>
+            </div>
+        </div>
     </div>
-</div></div></div></div></div>
+</div>
 {% endblock %}
