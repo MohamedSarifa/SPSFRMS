@@ -6,13 +6,13 @@
     <div class="container position-relative">
         <div class="auth-shell">
             <aside class="auth-intro">
-                <span class="eyebrow mono">// welcome back</span>
+                <span class="eyebrow mono">welcome back</span>
                 <h1>Keep track of the issues you reported.</h1>
                 <p>Sign in to submit complaints, view updates and follow your complaint history.</p>
                 <ul class="auth-points">
                     <li><i class="bi bi-shield-check" aria-hidden="true"></i> Hashed password storage</li>
                     <li><i class="bi bi-clock-history" aria-hidden="true"></i> Full status history</li>
-                    <li><i class="bi bi-people" aria-hidden="true"></i> Citizen, officer &amp; admin roles</li>
+                    <li><i class="bi bi-people" aria-hidden="true"></i> Citizen, department head, staff &amp; admin roles</li>
                 </ul>
             </aside>
 
@@ -29,8 +29,10 @@
                         <div class="segmented" role="radiogroup">
                             <input type="radio" class="btn-check" name="role" id="roleCitizen" value="citizen" checked>
                             <label for="roleCitizen"><i class="bi bi-person" aria-hidden="true"></i> Citizen</label>
-                            <input type="radio" class="btn-check" name="role" id="roleOfficer" value="officer">
-                            <label for="roleOfficer"><i class="bi bi-person-badge" aria-hidden="true"></i> Officer</label>
+                            <input type="radio" class="btn-check" name="role" id="roleHead" value="department_head">
+                            <label for="roleHead"><i class="bi bi-person-badge" aria-hidden="true"></i> Department Head</label>
+                            <input type="radio" class="btn-check" name="role" id="roleStaff" value="staff">
+                            <label for="roleStaff"><i class="bi bi-person-workspace" aria-hidden="true"></i> Staff</label>
                             <input type="radio" class="btn-check" name="role" id="roleAdmin" value="admin">
                             <label for="roleAdmin"><i class="bi bi-shield-lock" aria-hidden="true"></i> Admin</label>
                         </div>
@@ -53,11 +55,6 @@
 
                 <p class="auth-switch">New citizen? <a href="{{ url_for('register') }}">Create an account</a></p>
 
-                <div class="demo-box mono">
-                    <span class="demo-title"><i class="bi bi-terminal" aria-hidden="true"></i> demo accounts</span>
-                    <span>officer@spsfrms.com <em>/</em> officer123</span>
-                    <span>admin@spsfrms.com <em>/</em> admin123</span>
-                </div>
             </div>
         </div>
     </div>

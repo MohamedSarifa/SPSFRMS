@@ -5,11 +5,11 @@
     <div class="container">
         <header class="page-head">
             <div>
-                <span class="eyebrow mono">// officer panel</span>
-                <h1>Complaint response desk</h1>
-                <p>Review incoming public issues and keep their status up to date.</p>
+                <span class="eyebrow mono">{{ dashboard_role }}</span>
+                <h1>{{ dashboard_title }}</h1>
+                <p>{% if department %}{{ department.name }} department complaint queue.{% elif dashboard_role == 'staff' %}Complaints assigned to you.{% else %}Review complaint activity across the system.{% endif %}</p>
             </div>
-            <span class="role-chip mono"><i class="bi bi-person-badge" aria-hidden="true"></i> officer</span>
+            <span class="role-chip mono"><i class="bi bi-person-badge" aria-hidden="true"></i> {{ dashboard_role }}</span>
         </header>
 
         <div class="metrics">
@@ -23,7 +23,7 @@
             <div class="panel-head">
                 <div>
                     <h2 id="queueTitle">Complaint queue</h2>
-                    <p>Changing a status saves it immediately.</p>
+                    <p>{% if can_assign %}Assign complaints to staff in your department and update status.{% else %}Update status for complaints available to your account.{% endif %}</p>
                 </div>
                 <div class="input-icon table-search">
                     <i class="bi bi-search" aria-hidden="true"></i>
@@ -33,7 +33,7 @@
             <div class="table-responsive">
                 <table class="table data-table align-middle mb-0" id="queueTable">
                     <thead>
-                        <tr><th scope="col">Complaint</th><th scope="col">Citizen</th><th scope="col">Category</th><th scope="col">Department</th><th scope="col">Priority</th><th scope="col">Location</th><th scope="col">Status</th><th scope="col">Update</th></tr>
+                        <tr><th scope="col">Complaint</th><th scope="col">Citizen</th><th scope="col">Category</th><th scope="col">Department</th><th scope="col">Priority</th><th scope="col">Location</th><th scope="col">Status</th>{% if can_assign %}<th scope="col">Assigned staff / assign</th>{% endif %}<th scope="col">Created</th>{% if dashboard_role == 'staff' %}<th scope="col">Work</th>{% endif %}</tr>
                     </thead>
                     <tbody>
                     {% for c in complaints %}
@@ -45,16 +45,34 @@
                             <td><span class="priority {{ c.priority|lower }}">{{ c.priority }}</span></td>
                             <td class="cell-location">{{ c.location }}</td>
                             <td><span class="status-badge {{ c.status|lower|replace(' ','-') }}">{{ c.status }}</span></td>
+                            {% if can_assign %}
                             <td>
-                                <form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}">
-                                    <select name="status" class="form-select form-select-sm status-select" aria-label="Update status for CMP{{ '%03d'|format(c.id) }}" data-autosubmit>
-                                        {% for s in ['Submitted','Under Review','In Progress','Resolved'] %}<option value="{{ s }}" {% if c.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+                                {% if c.assigned_staff %}<small class="cell-sub mb-2">Assigned to {{ c.assigned_staff.name }}</small>{% endif %}
+                                {% if staff_members %}
+                                <form method="POST" action="{{ url_for('assign_complaint', complaint_id=c.id) }}" class="d-flex gap-2">
+                                    <select name="staff_id" class="form-select form-select-sm" aria-label="Assign CMP{{ '%03d'|format(c.id) }} to staff" required>
+                                        <option value="">{{ 'Reassign staff' if c.assigned_staff else 'Select staff' }}</option>
+                                        {% for staff in staff_members %}<option value="{{ staff.id }}" {% if c.assigned_staff_id == staff.id %}selected{% endif %}>{{ staff.name }}</option>{% endfor %}
                                     </select>
+                                    <input type="text" name="remarks" class="form-control form-control-sm" placeholder="Assignment note" aria-label="Assignment note for CMP{{ '%03d'|format(c.id) }}">
+                                    <button class="btn btn-outline-subtle btn-sm" type="submit">Assign</button>
                                 </form>
+                                {% else %}<span class="text-muted-2">No staff accounts</span>{% endif %}
                             </td>
+                            {% endif %}
+                            <td class="mono text-muted-2">{{ c.created_date.strftime('%d %b %Y, %I:%M %p') }}</td>
+                            {% if dashboard_role == 'staff' %}
+                            <td>
+                                {% if c.status in ['Submitted', 'Assigned'] %}
+                                <form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}"><input type="hidden" name="status" value="In Progress"><button class="btn btn-outline-subtle btn-sm" type="submit">Start Work</button></form>
+                                {% elif c.status == 'In Progress' %}
+                                <form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}" class="d-flex flex-column gap-2"><textarea name="remarks" class="form-control form-control-sm" rows="2" placeholder="Resolution note" aria-label="Resolution note for CMP{{ '%03d'|format(c.id) }}" required></textarea><input type="hidden" name="status" value="Resolved"><button class="btn btn-accent btn-sm" type="submit">Mark as Resolved</button></form>
+                                {% elif c.status == 'Resolved' %}<span class="text-muted-2">Completed</span>{% else %}<span class="text-muted-2">Awaiting assignment</span>{% endif %}
+                            </td>
+                            {% endif %}
                         </tr>
                     {% else %}
-                        <tr><td colspan="8"><div class="empty-state"><i class="bi bi-inbox" aria-hidden="true"></i><h3>Queue is empty</h3><p>New complaints will appear here.</p></div></td></tr>
+                        <tr><td colspan="{{ 9 if can_assign or dashboard_role == 'staff' else 8 }}"><div class="empty-state"><i class="bi bi-inbox" aria-hidden="true"></i><h3>Queue is empty</h3><p>New complaints will appear here.</p></div></td></tr>
                     {% endfor %}
                     </tbody>
                 </table>

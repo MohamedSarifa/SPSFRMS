@@ -6,7 +6,7 @@
     <div class="container">
         <header class="page-head">
             <div>
-                <span class="eyebrow mono">// administration</span>
+                <span class="eyebrow mono">administration</span>
                 <h1>System overview</h1>
                 <p>Monitor users, departments and complaint activity.</p>
             </div>
@@ -15,7 +15,7 @@
 
         <div class="metrics">
             <div class="metric"><span class="metric-label">Total users</span><strong>{{ users }}</strong><i class="bi bi-people" aria-hidden="true"></i></div>
-            <div class="metric"><span class="metric-label">Officers</span><strong>{{ officers }}</strong><i class="bi bi-person-badge" aria-hidden="true"></i></div>
+            <div class="metric"><span class="metric-label">Department team</span><strong>{{ officers }}</strong><i class="bi bi-person-badge" aria-hidden="true"></i></div>
             <div class="metric"><span class="metric-label">Departments</span><strong>{{ departments }}</strong><i class="bi bi-building" aria-hidden="true"></i></div>
             <div class="metric accent-blue"><span class="metric-label">Complaints</span><strong>{{ complaints }}</strong><i class="bi bi-files" aria-hidden="true"></i></div>
         </div>
@@ -28,7 +28,10 @@
                             <h2 id="recentTitle">Recent complaints</h2>
                             <p>Latest activity across the system.</p>
                         </div>
-                        <span class="count-chip mono">last {{ recent_complaints|length }}</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <a href="{{ url_for('admin_complaints') }}" class="btn btn-outline-subtle btn-sm">All complaints</a>
+                            <span class="count-chip mono">last {{ recent_complaints|length }}</span>
+                        </div>
                     </div>
                     <div class="table-responsive">
                         <table class="table data-table align-middle mb-0">
@@ -68,6 +71,71 @@
                         <li><span class="summary-icon orange" aria-hidden="true"><i class="bi bi-hourglass-split"></i></span><div><b>{{ pending }}</b><small>Open complaints</small></div></li>
                         <li><span class="summary-icon green" aria-hidden="true"><i class="bi bi-check2-circle"></i></span><div><b>{{ resolved }}</b><small>Resolved complaints</small></div></li>
                     </ul>
+                </section>
+            </div>
+        </div>
+
+        <div class="row g-4 mt-0">
+            <div class="col-lg-5">
+                <section class="panel p-4 h-100" aria-labelledby="departmentsTitle">
+                    <h2 id="departmentsTitle" class="panel-title mb-3">Departments</h2>
+                    <form method="POST" action="{{ url_for('admin_manage') }}" class="mb-4">
+                        <input type="hidden" name="action" value="create_department">
+                        <label class="form-label" for="departmentName">Add department</label>
+                        <div class="d-flex gap-2">
+                            <input class="form-control" id="departmentName" name="name" placeholder="Department name" required>
+                            <button class="btn btn-accent" type="submit">Add</button>
+                        </div>
+                    </form>
+                    <ul class="summary-list">
+                        {% for department in all_departments %}
+                        <li>
+                            <span class="summary-icon"><i class="bi bi-building" aria-hidden="true"></i></span>
+                            <div><b>{{ department.name }}</b><small>Head: {{ department.head.name if department.head else 'Not assigned' }} · {{ department.members|selectattr('role', 'equalto', 'staff')|list|length }} staff</small></div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </section>
+            </div>
+            <div class="col-lg-7">
+                <section class="panel p-4" aria-labelledby="staffSetupTitle">
+                    <h2 id="staffSetupTitle" class="panel-title mb-3">Department accounts</h2>
+                    <form method="POST" action="{{ url_for('admin_manage') }}" class="row g-2 mb-4">
+                        <input type="hidden" name="action" value="create_user">
+                        <div class="col-sm-6"><label class="form-label" for="newName">Name</label><input class="form-control" id="newName" name="name" required></div>
+                        <div class="col-sm-6"><label class="form-label" for="newEmail">Email</label><input class="form-control" id="newEmail" name="email" type="email" required></div>
+                        <div class="col-sm-6"><label class="form-label" for="newPhone">Phone</label><input class="form-control" id="newPhone" name="phone" required></div>
+                        <div class="col-sm-6"><label class="form-label" for="newPassword">Temporary password</label><input class="form-control" id="newPassword" name="password" type="password" minlength="8" required></div>
+                        <div class="col-sm-5"><label class="form-label" for="newRole">Role</label><select class="form-select" id="newRole" name="role"><option value="department_head">Department Head</option><option value="staff">Staff</option></select></div>
+                        <div class="col-sm-5"><label class="form-label" for="newDepartment">Department</label><select class="form-select" id="newDepartment" name="department_id" required>{% for department in all_departments %}<option value="{{ department.id }}">{{ department.name }}</option>{% endfor %}</select></div>
+                        <div class="col-sm-2 d-flex align-items-end"><button class="btn btn-accent w-100" type="submit">Create</button></div>
+                    </form>
+                    <h3 class="panel-title">All users</h3>
+                    <div class="table-responsive">
+                        <table class="table data-table align-middle mb-0">
+                            <thead><tr><th>User</th><th>Role</th><th>Department access</th><th></th></tr></thead>
+                            <tbody>
+                            {% for account in all_users %}
+                                <tr>
+                                    <td>{{ account.name }}<small class="cell-sub">{{ account.email }}</small></td>
+                                    <td colspan="3">
+                                        <form method="POST" action="{{ url_for('admin_manage') }}" class="d-flex flex-wrap gap-2">
+                                            <input type="hidden" name="action" value="assign_user"><input type="hidden" name="user_id" value="{{ account.id }}">
+                                            <select name="role" class="form-select form-select-sm" aria-label="Role for {{ account.name }}">
+                                                {% for role in ['citizen','department_head','staff','admin'] %}<option value="{{ role }}" {% if account.role == role %}selected{% endif %}>{{ role|replace('_',' ')|title }}</option>{% endfor %}
+                                            </select>
+                                            <select name="department_id" class="form-select form-select-sm" aria-label="Department for {{ account.name }}">
+                                                <option value="">No department</option>
+                                                {% for department in all_departments %}<option value="{{ department.id }}" {% if account.department_id == department.id %}selected{% endif %}>{{ department.name }}</option>{% endfor %}
+                                            </select>
+                                            <button class="btn btn-outline-subtle btn-sm" type="submit">Save</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
                 </section>
             </div>
         </div>

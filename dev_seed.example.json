@@ -1,0 +1,48 @@
+{
+  "departments": [
+    "Road Maintenance",
+    "Street Light"
+  ],
+  "users": [
+    {
+      "name": "Arun",
+      "email": "arun.head@demo.spsfrms.local",
+      "phone": "0000000000",
+      "password": "head123",
+      "role": "department_head",
+      "department": "Road Maintenance"
+    },
+    {
+      "name": "Ravi",
+      "email": "ravi.staff@demo.spsfrms.local",
+      "phone": "0000000000",
+      "password": "staff123",
+      "role": "staff",
+      "department": "Road Maintenance"
+    },
+    {
+      "name": "Kumar",
+      "email": "kumar.staff@demo.spsfrms.local",
+      "phone": "0000000000",
+      "password": "staff123",
+      "role": "staff",
+      "department": "Road Maintenance"
+    },
+    {
+      "name": "Priya",
+      "email": "priya.head@demo.spsfrms.local",
+      "phone": "0000000000",
+      "password": "head123",
+      "role": "department_head",
+      "department": "Street Light"
+    },
+    {
+      "name": "Mani",
+      "email": "mani.staff@demo.spsfrms.local",
+      "phone": "0000000000",
+      "password": "staff123",
+      "role": "staff",
+      "department": "Street Light"
+    }
+  ]
+}

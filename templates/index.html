@@ -4,8 +4,10 @@
 {% set role = session.get('role') %}
 {% if role == 'citizen' %}
     {% set report_url = url_for('submit_complaint') %}{% set track_url = url_for('citizen_dashboard') %}
-{% elif role == 'officer' %}
+{% elif role in ['officer', 'department_head'] %}
     {% set report_url = url_for('officer_dashboard') %}{% set track_url = url_for('officer_dashboard') %}
+{% elif role == 'staff' %}
+    {% set report_url = url_for('staff_dashboard') %}{% set track_url = url_for('staff_dashboard') %}
 {% elif role == 'admin' %}
     {% set report_url = url_for('admin_dashboard') %}{% set track_url = url_for('admin_dashboard') %}
 {% else %}
@@ -46,34 +48,35 @@
             </div>
 
             <div class="col-lg-6">
-                <div class="terminal" role="img" aria-label="Example: a complaint description is analysed into category {{ demo.category }}, priority {{ demo.priority }}, routed to {{ demo.department }}.">
+                <div class="terminal" role="img" aria-label="Compact terminal demonstration of complaint submission, analysis, processing, and resolution.">
                     <div class="terminal-bar">
                         <span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-                        <span class="terminal-title mono">spsfrms ~ analyze</span>
-                        <span class="terminal-tag mono">keyword engine</span>
+                        <span class="terminal-title mono">Complaint journey</span>
+                        <span class="terminal-tag mono">Live status</span>
                     </div>
                     <div class="terminal-body mono">
-                        <div class="t-line"><span class="t-prompt">$</span> spsfrms report --analyze</div>
-                        <div class="t-line t-input">&ldquo;{{ demo.text }}&rdquo;</div>
-                        <div class="t-line t-dim"><span class="t-ok">&#10003;</span> scanning description&hellip;</div>
-                        <div class="t-line t-dim"><span class="t-ok">&#10003;</span> matched: {% for k in demo.keywords %}<span class="t-key">{{ k }}</span>{% endfor %}</div>
-
-                        <dl class="t-output">
-                            <div><dt>category</dt><dd class="t-blue">{{ demo.category }}</dd></div>
-                            <div><dt>priority</dt><dd><span class="priority {{ demo.priority|lower }}">{{ demo.priority }}</span></dd></div>
-                            <div><dt>department</dt><dd class="t-green">{{ demo.department }}</dd></div>
-                            <div><dt>status</dt><dd><span class="status-badge submitted">Submitted</span></dd></div>
-                        </dl>
-
-                        <div class="t-line"><span class="t-prompt">$</span> <span class="t-cursor" aria-hidden="true"></span></div>
-                    </div>
-                    <div class="terminal-foot">
-                        <ol class="mini-pipeline">
-                            <li class="done"><span></span>Submitted</li>
-                            <li class="active"><span></span>Under Review</li>
-                            <li><span></span>In Progress</li>
-                            <li><span></span>Resolved</li>
-                        </ol>
+                        <div class="journey-session">
+                            <section class="journey-stage">
+                                <h3>Complaint</h3>
+                                <div class="t-line t-prompt">$ citizen@SPSFRMS:~$ submit complaint</div>
+                                <div class="t-line t-input">&gt; &ldquo;Large pothole near the main road&rdquo;</div>
+                            </section>
+                            <section class="journey-stage">
+                                <h3>Text analysis</h3>
+                                <div class="t-line t-prompt">$ system@SPSFRMS:~$ analyze</div>
+                                <div class="t-line t-output-line">&gt; Road Damage | Medium | Road Maintenance</div>
+                            </section>
+                            <section class="journey-stage">
+                                <h3>Process</h3>
+                                <div class="t-line t-prompt">$ system@SPSFRMS:~$ process complaint</div>
+                                <div class="t-line t-output-line">&gt; #SP-1024 | Submitted &rarr; Under Review</div>
+                            </section>
+                            <section class="journey-stage journey-stage-final">
+                                <h3>Resolution</h3>
+                                <div class="t-line t-prompt">$ citizen@SPSFRMS:~$ track</div>
+                                <div class="t-line t-output-line">&gt; In Progress &rarr; Resolved</div>
+                            </section>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -84,7 +87,6 @@
 <section class="section">
     <div class="container">
         <div class="section-head">
-            <span class="eyebrow mono">// how it works</span>
             <h2>From a sentence to a <span class="text-gradient">response.</span></h2>
             <p>No forms full of dropdowns. Describe what you see — the system handles the rest.</p>
         </div>
@@ -122,7 +124,7 @@
     <div class="container">
         <div class="row g-5 align-items-center">
             <div class="col-lg-5">
-                <span class="eyebrow mono">// routing</span>
+                <span class="eyebrow mono">routing</span>
                 <h2>Every report lands with the right team.</h2>
                 <p class="lead-muted">Each complaint is matched to one of {{ categories|length }} categories and sent directly to the department that handles it. Danger words like <code>fire</code>, <code>accident</code> or <code>live wire</code> raise the priority automatically.</p>
                 <div class="legend">
@@ -149,7 +151,7 @@
 <section class="section">
     <div class="container">
         <div class="section-head">
-            <span class="eyebrow mono">// roles</span>
+            <span class="eyebrow mono">roles</span>
             <h2>Built for everyone in the loop.</h2>
         </div>
         <div class="row g-3 mt-2">
@@ -182,7 +184,7 @@
     <div class="container">
         <div class="cta">
             <div class="cta-glow" aria-hidden="true"></div>
-            <span class="eyebrow mono">// ready?</span>
+            <span class="eyebrow mono">ready?</span>
             <h2>Turn a local problem into a visible request for action.</h2>
             <p>Create a free citizen account and submit your first report in under a minute.</p>
             <div class="hero-actions justify-content-center">
