@@ -4,3 +4,7 @@ __pycache__/
 .env
 uploads/*
 !uploads/.gitkeep
+
+# Local private roster and unreviewed password utility; never publish these.
+/SPSFRMS_officers_staff_50.csv
+/et_all_demo_passwords.py
