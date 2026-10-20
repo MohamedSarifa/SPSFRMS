@@ -20,6 +20,7 @@
         <div class="row g-4">
             <div class="col-lg-8">
                 <section class="panel p-4" aria-labelledby="progressTitle">
+                    {% if complaint.status == 'Ignored' %}<div class="alert alert-warning">This complaint is in the ignored queue. A Department Head can restore it; the complaint and its history are retained.</div>{% else %}
                     <div class="d-flex justify-content-between align-items-center mb-4">
                         <h2 id="progressTitle" class="panel-title">Response progress</h2>
                         <span class="count-chip mono">{{ current_index + 1 }}/{{ states|length }}</span>
@@ -31,16 +32,32 @@
                             <span class="timeline-dot">{% if loop.index0 < current_index or (loop.index0 == current_index and state == 'Resolved') %}<i class="bi bi-check-lg" aria-hidden="true"></i>{% else %}{{ loop.index }}{% endif %}</span>
                             <div>
                                 <b>{{ state }}</b>
-                            <small>{% if state == 'Submitted' %}Complaint received{% elif state == 'Analyzed' %}Category, priority and department identified{% elif state == 'Assigned' %}Sent to the department's assigned staff member{% elif state == 'In Progress' %}Assigned staff member is working on it{% else %}Complaint marked as resolved{% endif %}</small>
+                            <small>{% if state == 'Submitted' %}Complaint received{% elif state == 'Analyzed' %}Category, priority and department identified{% elif state == 'Assigned' %}Sent to the department's assigned staff member{% elif state == 'In Progress' %}Assigned staff member is working on it{% elif state == 'Resolved' %}Complaint marked as resolved{% endif %}</small>
                             </div>
                             {% if loop.index0 == current_index %}<span class="current-tag mono">current</span>{% endif %}
                         </li>
                         {% endfor %}
                     </ol>
-                    <p class="text-muted-2 small mono mb-0 mt-3">last updated {{ complaint.updated_date.strftime('%d %b %Y, %I:%M %p') if complaint.updated_date else complaint.created_date.strftime('%d %b %Y, %I:%M %p') }}</p>
-                    {% if status_history %}
-                    <div class="mt-4"><h3 class="panel-title mb-2">Status history</h3><ul class="summary-list mb-0">{% for event in status_history %}<li><span class="summary-icon green"><i class="bi bi-arrow-right" aria-hidden="true"></i></span><div><b>{{ event.old_status or 'New' }} → {{ event.new_status }}</b><small>{{ event.timestamp.strftime('%d %b %Y, %I:%M %p') }}{% if event.remarks %} · {{ event.remarks }}{% endif %}</small></div></li>{% endfor %}</ul></div>
                     {% endif %}
+                    <p class="text-muted-2 small mono mb-0 mt-3">last updated {{ (complaint.updated_date or complaint.created_date)|kolkata_datetime }}</p>
+                    <div class="mt-4">
+                        <h3 class="panel-title mb-2">Status history</h3>
+                        {% if status_history %}
+                        <ul class="summary-list mb-0">
+                            {% for event in status_history %}
+                            <li>
+                                <span class="summary-icon green"><i class="bi bi-arrow-right" aria-hidden="true"></i></span>
+                                <div>
+                                    <b>{{ event.old_status or 'New' }} → {{ event.new_status }}</b>
+                                    <small>{{ event.timestamp|kolkata_datetime }}{% if event.remarks %} · {{ event.remarks }}{% endif %}</small>
+                                </div>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p class="small text-muted-2 mb-0">No recorded status events are available.</p>
+                        {% endif %}
+                    </div>
                 </section>
 
                 <section class="panel p-4 mt-4" aria-labelledby="descTitle">
@@ -60,18 +77,23 @@
                     <dl class="details">
                         <div><dt>Category</dt><dd>{{ complaint.category }}</dd></div>
                         <div><dt>Priority</dt><dd><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></dd></div>
-                        <div><dt>Assigned Department</dt><dd>{{ complaint.department.name ~ ' Department' if complaint.department else 'Unassigned' }}</dd></div>
+                        <div><dt>Assigned Department{% if linked_departments|length > 1 %}s{% endif %}</dt><dd>{{ linked_departments|join(', ') if linked_departments else 'Unassigned' }}</dd></div>
                         <div><dt>Assigned Staff</dt><dd>{{ complaint.assigned_staff.name if complaint.assigned_staff else 'Awaiting assignment' }}</dd></div>
                         {% if complaint.status == 'Resolved' %}<div><dt>Resolution note</dt><dd>{{ complaint.resolution_note or 'No resolution note provided.' }}</dd></div>{% endif %}
                         <div><dt>Location</dt><dd>{{ complaint.location }}</dd></div>
-                        <div><dt>Submitted</dt><dd class="mono">{{ complaint.created_date.strftime('%d %b %Y, %I:%M %p') }}</dd></div>
+                        <div><dt>Submitted</dt><dd class="mono">{{ complaint.created_date|kolkata_datetime }}</dd></div>
                         {% if role != 'citizen' %}<div><dt>Citizen</dt><dd>{{ complaint.citizen.name }}</dd></div>{% endif %}
                         <div><dt>Photo</dt><dd>{{ 'Attached' if complaint.image else 'None' }}</dd></div>
                     </dl>
+                    <div class="analysis-explanation mt-3">
+                        {% if multi_department_review %}<p class="small text-warning"><strong>Manual review required:</strong> this legacy category is read-only because the current workflow supports one department owner, assignee, and status.</p>{% endif %}
+                        <p class="small mb-1"><strong>Classification explanation:</strong> {{ analysis.reason }}</p>
+                        {% if analysis.needs_review %}<p class="small text-warning mb-0">This routing is provisional and needs human review.</p>{% endif %}
+                    </div>
 
-                    {% if role == 'staff' and complaint.assigned_staff_id == session.get('user_id') and complaint.status in ['Submitted', 'Assigned'] %}
+                    {% if role == 'staff' and not multi_department_review and complaint.assigned_staff_id == session.get('user_id') and complaint.status in ['Submitted', 'Assigned'] %}
                     <form method="POST" action="{{ url_for('update_status', complaint_id=complaint.id) }}" class="mt-4"><input type="hidden" name="status" value="In Progress"><input type="hidden" name="return_to" value="track"><button type="submit" class="btn btn-outline-subtle w-100">Start Work</button></form>
-                    {% elif role == 'staff' and complaint.assigned_staff_id == session.get('user_id') and complaint.status == 'In Progress' %}
+                    {% elif role == 'staff' and not multi_department_review and complaint.assigned_staff_id == session.get('user_id') and complaint.status == 'In Progress' %}
                     <form method="POST" action="{{ url_for('update_status', complaint_id=complaint.id) }}" class="mt-4"><label class="form-label" for="resolutionNote">Resolution note</label><textarea class="form-control mb-2" id="resolutionNote" name="remarks" rows="3" placeholder="Describe the completed work" required></textarea><input type="hidden" name="status" value="Resolved"><input type="hidden" name="return_to" value="track"><button type="submit" class="btn btn-accent w-100">Mark as Resolved</button></form>
                     {% endif %}
                 </aside>

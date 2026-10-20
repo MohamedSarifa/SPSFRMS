@@ -102,14 +102,41 @@
                     <h2 id="staffSetupTitle" class="panel-title mb-3">Department accounts</h2>
                     <form method="POST" action="{{ url_for('admin_manage') }}" class="row g-2 mb-4">
                         <input type="hidden" name="action" value="create_user">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="col-sm-6"><label class="form-label" for="newName">Name</label><input class="form-control" id="newName" name="name" required></div>
                         <div class="col-sm-6"><label class="form-label" for="newEmail">Email</label><input class="form-control" id="newEmail" name="email" type="email" required></div>
                         <div class="col-sm-6"><label class="form-label" for="newPhone">Phone</label><input class="form-control" id="newPhone" name="phone" required></div>
-                        <div class="col-sm-6"><label class="form-label" for="newPassword">Temporary password</label><input class="form-control" id="newPassword" name="password" type="password" minlength="8" required></div>
+                        <div class="col-sm-6"><label class="form-label" for="newPassword">Initial password</label><input class="form-control" id="newPassword" name="password" type="password" minlength="12" autocomplete="new-password" required><small class="text-muted-2">Use a different password of at least 12 characters for every account. Share it securely.</small></div>
                         <div class="col-sm-5"><label class="form-label" for="newRole">Role</label><select class="form-select" id="newRole" name="role"><option value="department_head">Department Head</option><option value="staff">Staff</option></select></div>
                         <div class="col-sm-5"><label class="form-label" for="newDepartment">Department</label><select class="form-select" id="newDepartment" name="department_id" required>{% for department in all_departments %}<option value="{{ department.id }}">{{ department.name }}</option>{% endfor %}</select></div>
                         <div class="col-sm-2 d-flex align-items-end"><button class="btn btn-accent w-100" type="submit">Create</button></div>
                     </form>
+                    <div class="password-reset-box mb-4">
+                        <h3 class="panel-title">Set or reset a password</h3>
+                        <p class="text-muted-2 small">Choose one staff or department-head account. The password is saved as a secure hash and is never displayed.</p>
+                        <form method="POST" action="{{ url_for('admin_manage') }}" class="row g-2">
+                            <input type="hidden" name="action" value="reset_password">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <div class="col-12">
+                                <label class="form-label" for="resetTarget">Account</label>
+                                <select class="form-select" id="resetTarget" name="user_id" required>
+                                    <option value="">Select an account</option>
+                                    {% for account in all_users if account.role in ['department_head', 'staff', 'officer'] %}
+                                    <option value="{{ account.id }}">{{ account.name }} — {{ account.email }} ({{ account.role|replace('_', ' ')|title }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="resetPassword">New password</label>
+                                <input class="form-control" id="resetPassword" name="new_password" type="password" minlength="12" autocomplete="new-password" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="confirmResetPassword">Confirm new password</label>
+                                <input class="form-control" id="confirmResetPassword" name="confirm_password" type="password" minlength="12" autocomplete="new-password" required>
+                            </div>
+                            <div class="col-12"><button class="btn btn-accent" type="submit">Update selected account password</button></div>
+                        </form>
+                    </div>
                     <h3 class="panel-title">All users</h3>
                     <div class="table-responsive">
                         <table class="table data-table align-middle mb-0">

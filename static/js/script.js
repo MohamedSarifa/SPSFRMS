@@ -17,8 +17,17 @@
         fetch(url, { headers: { Accept: 'application/json' } })
             .then(res => res.json().then(data => ({ ok: res.ok, data })))
             .then(({ ok, data }) => {
-                if (ok && data.status === 'ok') setState('ok', 'All systems operational');
-                else setState('down', 'Database unavailable');
+                if (data.database !== 'connected') {
+                    setState('down', 'Database unavailable');
+                } else if (data.initialization === 'failed') {
+                    setState('down', 'Database initialization failed');
+                } else if (data.initialization === 'not_run') {
+                    setState('down', 'Database connected');
+                } else if (ok && data.status === 'ok' && data.initialization === 'initialized') {
+                    setState('ok', 'Database connected · Startup initialization completed');
+                } else {
+                    setState('down', 'Database setup incomplete');
+                }
             })
             .catch(() => setState('down', 'Status unavailable'));
     }
@@ -33,6 +42,8 @@
             priority: document.getElementById('resultPriority'),
             department: document.getElementById('resultDepartment'),
             keywords: document.getElementById('resultKeywords'),
+            reason: document.getElementById('resultReason'),
+            review: document.getElementById('resultReview'),
         };
         let timer = null;
         let controller = null;
@@ -43,12 +54,16 @@
             els.priority.textContent = '—';
             els.department.textContent = '—';
             els.keywords.textContent = '—';
+            if (els.reason) els.reason.textContent = 'The department explanation will appear as you describe the issue.';
+            if (els.review) els.review.hidden = true;
         };
 
         const render = data => {
             els.state.textContent = 'analysis complete';
             els.category.textContent = data.category;
             els.department.textContent = data.department;
+            if (els.reason) els.reason.textContent = data.reason || '';
+            if (els.review) els.review.hidden = !data.needs_review;
 
             const badge = document.createElement('span');
             badge.className = 'priority ' + data.priority.toLowerCase();

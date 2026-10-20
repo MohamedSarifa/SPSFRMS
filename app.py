@@ -2,9 +2,27 @@ from flask import Flask, render_template, request, redirect, url_for, session, f
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 from dotenv import load_dotenv
+from secrets import token_urlsafe
+from hmac import compare_digest
+from zoneinfo import ZoneInfo
+from database_config import environment_database_url
+from workflow_routing import CATEGORY_DEPARTMENTS, LEGACY_DEPARTMENT_NAMES, MULTI_DEPARTMENT_LEGACY_CATEGORY
+from password_policy import require_unique_passwords
+from password_policy import (
+    MIN_NEW_ACCOUNT_PASSWORD_LENGTH,
+    individual_passwords_for,
+    parse_password_map_json,
+    password_meets_policy,
+)
+from account_identity import normalize_email
+from staff_recommendation import load_model_artifact, recommend_staff
+from assignment_audit_models import (
+    application_tables_excluding_audit,
+    register_assignment_audit_models,
+)
 import json
 import os
 import re
@@ -15,12 +33,8 @@ app = Flask(__name__)
 
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "spsfrms-local-secret-key")
 
-database_url = os.getenv("DATABASE_URL")
+database_url = environment_database_url()
 if database_url:
-    if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql://", 1)
-    if database_url.startswith("postgresql://"):
-        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 else:
     app.config["SQLALCHEMY_DATABASE_URI"] = (
@@ -28,40 +42,42 @@ else:
     )
 
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
+}
 app.config["UPLOAD_FOLDER"] = "uploads"
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+app.jinja_env.globals["csrf_token"] = lambda: csrf_token()
 
 
 db = SQLAlchemy(app)
+StaffEligibilityPeriod, AssignmentEvent = register_assignment_audit_models(db)
+
+
+def utcnow():
+    """Return naive UTC timestamps to match existing database DateTime columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def format_kolkata_datetime(value):
+    """Format a stored UTC datetime as Asia/Kolkata without double conversion."""
+    if not isinstance(value, datetime):
+        return "Date/time unavailable"
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p %Z")
+
+
+app.jinja_env.filters["kolkata_datetime"] = format_kolkata_datetime
 
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
 CATEGORIES = [
     "Road Damage", "Garbage", "Water Leakage", "Street Light",
-    "Drainage", "Electricity", "Traffic", "Fire", "Other"
+    "Drainage", "Water Supply", "Electricity", "Traffic", "Fire", "Public Health", "Other"
 ]
 STATUSES = ["Submitted", "Under Review", "Assigned", "In Progress", "Resolved"]
 ROLES = {"citizen", "department_head", "staff", "admin"}
-CATEGORY_DEPARTMENTS = {
-    "Road Damage": "Road Maintenance",
-    "Garbage": "Waste Management",
-    "Water Leakage": "Water Supply",
-    "Street Light": "Street Light",
-    "Drainage": "Public Health",
-    "Electricity": "Electricity",
-    "Traffic": "Police",
-    "Fire": "Fire Department",
-    "Other": "Public Health",
-}
-LEGACY_DEPARTMENT_NAMES = {
-    "Road Maintenance": {"Road Damage"},
-    "Waste Management": {"Garbage"},
-    "Water Supply": {"Water Leakage"},
-    "Street Light": set(),
-    "Public Health": {"Drainage", "Other"},
-    "Electricity": set(),
-    "Police": {"Traffic"},
-    "Fire Department": {"Fire"},
-}
 DEPARTMENT_NAMES = sorted(set(CATEGORY_DEPARTMENTS.values()))
 
 
@@ -72,7 +88,7 @@ class User(db.Model):
     phone = db.Column(db.String(20), nullable=False)
     password = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), default="citizen")
-    registered_date = db.Column(db.DateTime, default=datetime.utcnow)
+    registered_date = db.Column(db.DateTime, default=utcnow)
     department_id = db.Column(db.Integer, db.ForeignKey("department.id", ondelete="SET NULL"))
 
     complaints = db.relationship("Complaint", backref="citizen", lazy=True, foreign_keys="Complaint.citizen_id")
@@ -81,11 +97,23 @@ class User(db.Model):
     assigned_complaints = db.relationship("Complaint", back_populates="assigned_staff", foreign_keys="Complaint.assigned_staff_id")
 
 
+def find_user_by_email(email):
+    """Find an account using the application's normalized email identity."""
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return None
+    return User.query.filter(
+        db.func.lower(db.func.trim(User.email)) == normalized_email
+    ).one_or_none()
+
+
 class Department(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
     email = db.Column(db.String(120))
-    head_id = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="SET NULL"))
+    head_id = db.Column(db.Integer, db.ForeignKey(
+        "user.id", ondelete="SET NULL", use_alter=True, name="fk_department_head_user"
+    ))
 
     head = db.relationship("User", foreign_keys=[head_id], back_populates="headed_department")
     members = db.relationship("User", foreign_keys=[User.department_id], back_populates="department")
@@ -99,7 +127,7 @@ class ComplaintDepartment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     complaint_id = db.Column(db.Integer, db.ForeignKey("complaint.id", ondelete="CASCADE"), nullable=False)
     department_id = db.Column(db.Integer, db.ForeignKey("department.id", ondelete="CASCADE"), nullable=False)
-    assigned_date = db.Column(db.DateTime, default=datetime.utcnow)
+    assigned_date = db.Column(db.DateTime, default=utcnow)
 
     complaint = db.relationship("Complaint", back_populates="department_assignments")
     department = db.relationship("Department")
@@ -114,9 +142,9 @@ class Complaint(db.Model):
     keywords = db.Column(db.String(255))
     priority = db.Column(db.String(20), default="Low")
     status = db.Column(db.String(30), default="Submitted")
-    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    created_date = db.Column(db.DateTime, default=utcnow)
     updated_date = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        db.DateTime, default=utcnow, onupdate=utcnow
     )
 
     citizen_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
@@ -127,7 +155,10 @@ class Complaint(db.Model):
     assigned_staff = db.relationship("User", back_populates="assigned_complaints", foreign_keys=[assigned_staff_id])
     department_assignments = db.relationship("ComplaintDepartment", back_populates="complaint", cascade="all, delete-orphan")
     assignment_history = db.relationship("ComplaintAssignment", back_populates="complaint", cascade="all, delete-orphan", order_by="ComplaintAssignment.assigned_date")
-    status_history = db.relationship("ComplaintStatusHistory", back_populates="complaint", cascade="all, delete-orphan", order_by="ComplaintStatusHistory.timestamp")
+    status_history = db.relationship(
+        "ComplaintStatusHistory", back_populates="complaint", cascade="all, delete-orphan",
+        order_by=lambda: (ComplaintStatusHistory.timestamp, ComplaintStatusHistory.id),
+    )
 
 
 class ComplaintAssignment(db.Model):
@@ -135,7 +166,7 @@ class ComplaintAssignment(db.Model):
     complaint_id = db.Column(db.Integer, db.ForeignKey("complaint.id", ondelete="CASCADE"), nullable=False, index=True)
     staff_id = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="RESTRICT"), nullable=False, index=True)
     assigned_by = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="RESTRICT"))
-    assigned_date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    assigned_date = db.Column(db.DateTime, nullable=False, default=utcnow)
     remarks = db.Column(db.Text)
 
     complaint = db.relationship("Complaint", back_populates="assignment_history")
@@ -149,7 +180,7 @@ class ComplaintStatusHistory(db.Model):
     old_status = db.Column(db.String(30))
     new_status = db.Column(db.String(30), nullable=False)
     updated_by = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="SET NULL"))
-    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, nullable=False, default=utcnow)
     remarks = db.Column(db.Text)
 
     complaint = db.relationship("Complaint", back_populates="status_history")
@@ -160,59 +191,136 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-KEYWORD_GROUPS = {
-    "Road Damage": ["road", "pothole", "crack", "broken road", "footpath", "pavement", "speed breaker"],
-    "Garbage": ["garbage", "waste", "trash", "dump", "litter", "rubbish"],
-    "Water Leakage": ["water", "leak", "pipe", "leakage", "tap"],
-    "Street Light": ["street light", "streetlight", "lamp", "light"],
-    "Drainage": ["drain", "drainage", "sewage", "sewer", "manhole", "waterlogging"],
-    "Electricity": ["electricity", "electric", "power", "wire", "current", "transformer"],
-    "Traffic": ["traffic", "signal", "vehicle", "jam", "congestion"],
-    "Fire": ["fire", "smoke", "burning", "flame"],
+CLASSIFICATION_RULES = {
+    "Drainage": [
+        ("drainage", 4), ("drain", 4), ("sewer", 3), ("sewage", 3),
+        ("manhole", 3), ("waterlogging", 3), ("storm drain", 4),
+        ("blocked drain", 5), ("drain overflow", 5), ("overflowing drain", 5),
+        ("water overflowing onto road", 4), ("overflowing water onto road", 4),
+    ],
+    "Water Leakage": [
+        ("water leak", 4), ("water leaking", 4), ("water leakage", 4), ("leaking pipe", 4),
+        ("burst pipe", 4), ("pipe burst", 4), ("water pipe", 2),
+    ],
+    "Water Supply": [
+        ("contaminated drinking water", 6), ("contaminated water", 5),
+        ("unsafe drinking water", 6), ("dirty drinking water", 6),
+        ("drinking water", 4), ("water supply", 4), ("tap water", 3),
+        ("no water", 3), ("low water pressure", 4),
+    ],
+    "Public Health": [
+        ("disease outbreak", 6), ("epidemic", 5), ("dengue", 5),
+        ("malaria", 5), ("food poisoning", 5), ("mosquito breeding", 5),
+        ("public health", 4),
+    ],
+    "Street Light": [("street light", 4), ("streetlight", 4), ("lamp post", 3), ("lamp", 2)],
+    "Road Damage": [("pothole", 4), ("broken road", 4), ("road crack", 3), ("road damage", 4),
+                    ("footpath", 2), ("pavement", 2), ("speed breaker", 2), ("road", 1)],
+    "Garbage": [("garbage", 3), ("waste", 2), ("trash", 3), ("dump", 2), ("litter", 2), ("rubbish", 2)],
+    "Electricity": [("live wire", 5), ("electric shock", 5), ("electricity", 3), ("power outage", 3),
+                    ("transformer", 3), ("electric", 2), ("wire", 1), ("current", 1)],
+    "Traffic": [("traffic signal", 4), ("traffic", 3), ("vehicle", 1), ("congestion", 2), ("traffic jam", 3)],
+    "Fire": [("fire", 5), ("smoke", 3), ("burning", 3), ("flame", 3)],
 }
-
 HIGH_PRIORITY_WORDS = [
-    "fire", "accident", "danger", "emergency", "injury", "injured",
-    "electric shock", "live wire", "collapse", "explosion", "gas leak",
+    "fire", "accident", "emergency", "electric shock", "live wire", "collapse",
+    "explosion", "gas leak", "injured", "injury", "trapped", "rescue",
 ]
 MEDIUM_PRIORITY_WORDS = [
-    "broken", "leak", "blocked", "damage", "traffic", "pothole", "overflow",
-    "difficulty", "unsafe", "large", "sewage", "not working",
+    "broken", "leak", "blocked", "damage", "traffic", "pothole", "overflow", "overflowing",
+    "difficulty", "unsafe", "sewage", "not working", "contaminated",
 ]
 
 
 def contains_word(text, word):
-    """Match a keyword at a word start so 'road' does not match 'broad'."""
-    return re.search(r"\b" + re.escape(word), text) is not None
+    """Match a complete phrase, avoiding substring matches such as road/broad."""
+    phrase = r"\s+".join(re.escape(part) for part in word.split())
+    return re.search(r"(?<!\w)" + phrase + r"(?!\w)", text, re.IGNORECASE) is not None
 
 
-def analyze_text(text):
-    """Simple predefined-keyword analysis; no AI model is used.
+def matched_rule_terms(text, rules):
+    """Return longest non-overlapping rule phrases so synonyms don't double-count."""
+    candidates = []
+    for phrase, weight in rules:
+        pattern = r"(?<!\w)" + r"\s+".join(re.escape(part) for part in phrase.split()) + r"(?!\w)"
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            candidates.append((match.start(), match.end(), phrase, weight))
+    candidates.sort(key=lambda match: (-(match[1] - match[0]), -match[3], match[0]))
+    selected = []
+    for candidate in candidates:
+        start, end, _, _ = candidate
+        if not any(start < existing_end and end > existing_start for existing_start, existing_end, _, _ in selected):
+            selected.append(candidate)
+    return [(phrase, weight) for _, _, phrase, weight in sorted(selected)]
 
-    The category with the most keyword matches wins; ties go to the
-    category listed first in KEYWORD_GROUPS.
-    """
-    text = (text or "").lower()
 
-    found_keywords = []
-    best_category = "Other"
-    best_score = 0
+def analyze_complaint(text):
+    """Apply transparent phrase rules; this is not a trained ML model."""
+    normalized = (text or "").lower()
+    scores = {}
+    matches_by_category = {}
+    for category, rules in CLASSIFICATION_RULES.items():
+        matches = matched_rule_terms(normalized, rules)
+        scores[category] = sum(weight for _, weight in matches)
+        matches_by_category[category] = [phrase for phrase, _ in matches]
 
-    for category, words in KEYWORD_GROUPS.items():
-        matches = [word for word in words if contains_word(text, word)]
-        found_keywords.extend(matches)
-        if len(matches) > best_score:
-            best_category = category
-            best_score = len(matches)
+    top_score = max(scores.values(), default=0)
+    top_categories = [category for category, score in scores.items() if score == top_score and score > 0]
+    strong_categories = [category for category, score in scores.items() if score >= 3]
+    ambiguous = len(strong_categories) > 1 or (top_score >= 3 and len(top_categories) > 1)
+    category = top_categories[0] if len(top_categories) == 1 and top_score >= 3 and not ambiguous else "Other"
+    keywords = list(dict.fromkeys(
+        phrase for name, matches in matches_by_category.items()
+        if name == category or ambiguous or category == "Other"
+        for phrase in matches
+    ))
+    needs_review = ambiguous or top_score < 3
+    department = CATEGORY_DEPARTMENTS[category]
+    if needs_review:
+        reason = "The description is ambiguous or does not match a specific rule; routed to the Public Health review queue for human confirmation."
+    else:
+        reason = f"The description matched {', '.join(matches_by_category[category])}; {category} reports go to {department}."
 
-    if any(contains_word(text, word) for word in HIGH_PRIORITY_WORDS):
+    emergency = any(contains_word(normalized, word) for word in HIGH_PRIORITY_WORDS)
+    if emergency:
         priority = "High"
-    elif any(contains_word(text, word) for word in MEDIUM_PRIORITY_WORDS):
+    elif any(contains_word(normalized, word) for word in MEDIUM_PRIORITY_WORDS):
         priority = "Medium"
     else:
         priority = "Low"
+    return {
+        "keywords": keywords,
+        "category": category,
+        "priority": priority,
+        "department": department,
+        "reason": reason,
+        "needs_review": needs_review,
+        "emergency": emergency,
+    }
 
-    return list(dict.fromkeys(found_keywords)), best_category, priority
+
+def analyze_text(text):
+    """Compatibility wrapper for callers that need the original three values."""
+    result = analyze_complaint(text)
+    return result["keywords"], result["category"], result["priority"]
+
+
+def priority_order_key(complaint):
+    """Emergency first, then priority, then oldest submission, then ID."""
+    analysis = analyze_complaint(complaint.complaint_text)
+    rank = {"High": 3, "Medium": 2, "Low": 1}.get(complaint.priority, 0)
+    created = complaint.created_date or datetime.max
+    return (not analysis["emergency"], -rank, created, complaint.id or 0)
+
+
+def complaint_age_label(created_date, now=None):
+    seconds = max(0, int(((now or utcnow()) - created_date).total_seconds()))
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)}m waiting"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {seconds % 3600 // 60}m waiting"
+    return f"{seconds // 86400}d {seconds % 86400 // 3600}h waiting"
 
 
 def department_label(category):
@@ -225,6 +333,18 @@ def login_required():
 
 def normalize_role(role):
     return "department_head" if role == "officer" else role
+
+
+def csrf_token():
+    """Return a session-bound CSRF token for sensitive admin forms."""
+    if "csrf_token" not in session:
+        session["csrf_token"] = token_urlsafe(32)
+    return session["csrf_token"]
+
+
+def valid_csrf_token(token):
+    expected = session.get("csrf_token")
+    return bool(expected and token and compare_digest(expected, token))
 
 
 def current_user():
@@ -273,6 +393,9 @@ def department_complaints_query(department):
     legacy_names = LEGACY_DEPARTMENT_NAMES.get(department.name, set())
     legacy_ids = [row.id for row in Department.query.filter(Department.name.in_(legacy_names)).all()] if legacy_names else []
     clauses = [Complaint.department_id == department.id]
+    # The association table can identify departments linked to a complaint.
+    # It does not provide independent ownership or workflow state per department.
+    clauses.append(Complaint.department_assignments.any(ComplaintDepartment.department_id == department.id))
     if legacy_ids:
         clauses.extend([
             Complaint.department_id.in_(legacy_ids),
@@ -284,13 +407,36 @@ def department_complaints_query(department):
     return Complaint.query.filter(db.or_(*clauses))
 
 
+def department_can_view_complaint(department, complaint):
+    """Authorize read access through canonical routing or explicit department links."""
+    if not department:
+        return False
+    if complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY:
+        return bool(department_complaints_query(department).filter_by(id=complaint.id).first())
+    canonical_name = CATEGORY_DEPARTMENTS.get(complaint.category)
+    if canonical_name and department.name != canonical_name:
+        return False
+    return bool(department_complaints_query(department).filter_by(id=complaint.id).first())
+
+
+def department_can_manage_complaint(department, complaint):
+    """Authorize workflow changes only where one department owns the workflow."""
+    if complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY:
+        return False
+    return department_can_view_complaint(department, complaint)
+
+
 def initialize_database():
     """Create missing tables and apply additive, data-preserving schema changes."""
     with app.app_context():
-        db.create_all()
+        # Keep prospective audit tables out of startup create_all until a reviewed migration.
+        db.metadata.create_all(
+            bind=db.engine,
+            tables=application_tables_excluding_audit(db.metadata),
+        )
         migrate_schema()
         for name in DEPARTMENT_NAMES:
-            Department.query.filter_by(name=name).first() or db.session.add(
+            Department.query.filter(db.func.lower(Department.name) == name.lower()).first() or db.session.add(
                 Department(name=name, email=f"{name.lower().replace(' ', '')}@spsfrms.local")
             )
         db.session.flush()
@@ -299,25 +445,26 @@ def initialize_database():
         # existing categorized complaint through its canonical department too.
         for complaint in Complaint.query.filter(Complaint.category.in_(CATEGORY_DEPARTMENTS)).all():
             department_name = CATEGORY_DEPARTMENTS[complaint.category]
-            department = Department.query.filter_by(name=department_name).first()
+            department = Department.query.filter(db.func.lower(Department.name) == department_name.lower()).first()
             if department and complaint.department_id != department.id:
                 complaint.department_id = department.id
         for complaint in Complaint.query.all():
-            if complaint.assigned_staff_id and not ComplaintAssignment.query.filter_by(complaint_id=complaint.id).first():
+            if (complaint.assigned_staff_id and (complaint.updated_date or complaint.created_date)
+                    and not ComplaintAssignment.query.filter_by(complaint_id=complaint.id).first()):
                 db.session.add(ComplaintAssignment(
                     complaint_id=complaint.id,
                     staff_id=complaint.assigned_staff_id,
                     assigned_by=None,
-                    assigned_date=complaint.updated_date or complaint.created_date or datetime.utcnow(),
+                    assigned_date=complaint.updated_date or complaint.created_date,
                     remarks="Existing assignment recorded during workflow upgrade.",
                 ))
-            if not ComplaintStatusHistory.query.filter_by(complaint_id=complaint.id).first():
+            if complaint.created_date and not ComplaintStatusHistory.query.filter_by(complaint_id=complaint.id).first():
                 db.session.add(ComplaintStatusHistory(
                     complaint_id=complaint.id,
                     old_status=None,
                     new_status=complaint.status or "Submitted",
                     updated_by=complaint.citizen_id,
-                    timestamp=complaint.created_date or datetime.utcnow(),
+                    timestamp=complaint.created_date,
                     remarks="Initial status recorded during workflow upgrade.",
                 ))
         db.session.commit()
@@ -342,17 +489,18 @@ def migrate_schema():
 
 
 def create_demo_users():
-    """Create the existing admin demo and optionally seed development staff."""
+    """Optionally create configured demo accounts with individual passwords."""
     with app.app_context():
-        if not User.query.filter_by(email="admin@spsfrms.com").first():
-            db.session.add(User(
-                name="System Administrator",
-                email="admin@spsfrms.com",
-                phone="9876543210",
-                password=generate_password_hash("admin123"),
-                role="admin",
-            ))
+        pending_accounts = []
+        admin_password = os.getenv("SPSFRMS_DEMO_ADMIN_PASSWORD")
+        admin_email = normalize_email("admin@spsfrms.com")
+        if (os.getenv("SPSFRMS_CREATE_DEMO_ADMIN") == "1"
+                and not find_user_by_email(admin_email)):
+            if not password_meets_policy(admin_password, MIN_NEW_ACCOUNT_PASSWORD_LENGTH):
+                raise ValueError("An individual admin password of at least 12 characters is required.")
+            pending_accounts.append((admin_email, admin_password))
 
+        seed_data = {"departments": [], "users": []}
         if os.getenv("SPSFRMS_SEED_DEMO_DATA") == "1":
             seed_path = os.getenv(
                 "SPSFRMS_SEED_FILE",
@@ -360,18 +508,53 @@ def create_demo_users():
             )
             with open(seed_path, encoding="utf-8") as seed_file:
                 seed_data = json.load(seed_file)
+            seed_users = seed_data.get("users", [])
+            seed_emails = [normalize_email(account.get("email")) for account in seed_users]
+            if any(not email for email in seed_emails) or len(set(seed_emails)) != len(seed_emails):
+                raise ValueError("Seed account email configuration is invalid or duplicated.")
+            if admin_email in seed_emails:
+                raise ValueError("The demo administrator address cannot also be a seeded account.")
+            new_seed_emails = [
+                email for email in seed_emails if not find_user_by_email(email)
+            ]
+            supplied_passwords = parse_password_map_json(
+                os.getenv("SPSFRMS_SEED_PASSWORDS_JSON", "{}")
+            )
+            seed_passwords = individual_passwords_for(
+                new_seed_emails, supplied_passwords,
+                minimum_length=MIN_NEW_ACCOUNT_PASSWORD_LENGTH,
+            )
+            pending_accounts.extend(zip(new_seed_emails, seed_passwords))
+
+        if pending_accounts:
+            require_unique_passwords(
+                [password for _, password in pending_accounts],
+                (row[0] for row in User.query.with_entities(User.password).all()),
+            )
+        pending_passwords = dict(pending_accounts)
+        if admin_email in pending_passwords:
+            db.session.add(User(
+                name="System Administrator",
+                email=admin_email,
+                phone="9876543210",
+                password=generate_password_hash(pending_passwords[admin_email]),
+                role="admin",
+            ))
+
+        if os.getenv("SPSFRMS_SEED_DEMO_DATA") == "1":
             for name in seed_data.get("departments", []):
-                if not Department.query.filter_by(name=name).first():
+                if not Department.query.filter(db.func.lower(Department.name) == name.lower()).first():
                     db.session.add(Department(name=name, email=f"{name.lower().replace(' ', '')}@spsfrms.local"))
             db.session.flush()
             for account in seed_data.get("users", []):
                 name = account["name"]
-                email = account["email"].lower()
+                email = normalize_email(account["email"])
                 role = account["role"]
                 department_name = account["department"]
-                password = account["password"]
-                user = User.query.filter_by(email=email).first()
-                department = Department.query.filter_by(name=department_name).first()
+                password = pending_passwords.get(email)
+                user = find_user_by_email(email)
+                department = Department.query.filter(db.func.lower(Department.name) == department_name.lower()).first()
+                created_user = False
                 if not user and department:
                     user = User(
                         name=name,
@@ -383,9 +566,8 @@ def create_demo_users():
                     )
                     db.session.add(user)
                     db.session.flush()
-                if user and department and role == "department_head" and department.head_id is None:
-                    user.role = role
-                    user.department_id = department.id
+                    created_user = True
+                if created_user and role == "department_head" and department.head_id is None:
                     department.head_id = user.id
             db.session.commit()
         else:
@@ -401,15 +583,18 @@ def home():
 def register():
     if request.method == "POST":
         name = request.form.get("name", "").strip()
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         phone = request.form.get("phone", "").strip()
         password = request.form.get("password", "")
 
         if not name or not email or not phone or not password:
             flash("Please fill all fields.", "danger")
             return render_template("register.html")
+        if len(password) < 6:
+            flash("Password must be at least 6 characters long.", "danger")
+            return render_template("register.html")
 
-        if User.query.filter_by(email=email).first():
+        if find_user_by_email(email):
             flash("Email already registered. Please login.", "warning")
             return redirect(url_for("login"))
 
@@ -432,11 +617,11 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         password = request.form.get("password", "")
         selected_role = normalize_role(request.form.get("role", "citizen"))
 
-        user = User.query.filter_by(email=email).first()
+        user = find_user_by_email(email)
 
         if user and check_password_hash(user.password, password):
             if normalize_role(user.role) != selected_role:
@@ -452,6 +637,35 @@ def login():
         flash("Invalid email, password or role.", "danger")
 
     return render_template("login.html")
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+@roles_required("citizen", "staff", "department_head", "admin")
+def change_password():
+    user = current_user()
+    if request.method == "POST":
+        if not valid_csrf_token(request.form.get("csrf_token", "")):
+            abort(400, description="Invalid or missing CSRF token.")
+
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not check_password_hash(user.password, current_password):
+            flash("The current password is incorrect.", "danger")
+        elif not password_meets_policy(new_password, MIN_NEW_ACCOUNT_PASSWORD_LENGTH):
+            flash("The new password must be at least 12 characters long.", "danger")
+        elif new_password != confirm_password:
+            flash("The new password entries do not match.", "danger")
+        elif check_password_hash(user.password, new_password):
+            flash("Choose a new password that differs from your current password.", "danger")
+        else:
+            user.password = generate_password_hash(new_password)
+            db.session.commit()
+            flash("Your password was changed successfully.", "success")
+            return redirect(url_for("change_password"))
+
+    return render_template("change_password.html")
 
 
 @app.route("/logout")
@@ -495,8 +709,21 @@ def submit_complaint():
         if not complaint_text or not location:
             flash("Please describe the issue and provide a location.", "danger")
             return render_template("submit_complaint.html", form=request.form)
+        if len(complaint_text) > 5000:
+            flash("Complaint descriptions must be 5,000 characters or fewer.", "danger")
+            return render_template("submit_complaint.html", form=request.form)
 
-        keywords, final_category, priority = analyze_text(complaint_text)
+        analysis = analyze_complaint(complaint_text)
+        final_category = analysis["category"]
+        priority = analysis["priority"]
+        keywords = analysis["keywords"]
+
+        department = Department.query.filter(
+            db.func.lower(Department.name) == analysis["department"].lower()
+        ).first()
+        if department is None:
+            flash("The responsible department is unavailable. Please try again later.", "danger")
+            return render_template("submit_complaint.html", form=request.form)
 
         image_name = None
         file = request.files.get("image")
@@ -511,8 +738,7 @@ def submit_complaint():
             os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
             file.save(os.path.join(app.config["UPLOAD_FOLDER"], image_name))
 
-        department = Department.query.filter_by(name=CATEGORY_DEPARTMENTS.get(final_category, "Public Health")).first()
-
+        submitted_at = utcnow()
         complaint = Complaint(
             complaint_text=complaint_text,
             category=final_category,
@@ -521,8 +747,9 @@ def submit_complaint():
             keywords=", ".join(keywords),
             priority=priority,
             status="Submitted",
+            created_date=submitted_at,
             citizen_id=user.id,
-            department_id=department.id if department else None,
+            department_id=department.id,
         )
 
         db.session.add(complaint)
@@ -532,13 +759,15 @@ def submit_complaint():
             old_status=None,
             new_status="Submitted",
             updated_by=user.id,
+            timestamp=submitted_at,
             remarks="Complaint submitted and text analysis completed.",
         ))
         db.session.commit()
 
         flash(
             f"Complaint CMP{complaint.id:03d} submitted. Category: {final_category} · "
-            f"Priority: {priority} · Routed to {department_label(final_category)}.",
+            f"Priority: {priority} · Routed to {department_label(final_category)}. "
+            f"{analysis['reason']}",
             "success",
         )
         return redirect(url_for("citizen_dashboard"))
@@ -552,12 +781,15 @@ def analyze_preview():
     """Live preview of the same keyword analysis used on submission."""
     data = request.get_json(silent=True) or {}
     text = str(data.get("text", ""))[:5000]
-    keywords, category, priority = analyze_text(text)
+    analysis = analyze_complaint(text)
     return {
-        "keywords": keywords,
-        "category": category,
-        "priority": priority,
-        "department": department_label(category),
+        "keywords": analysis["keywords"],
+        "category": analysis["category"],
+        "priority": analysis["priority"],
+        "department": analysis["department"],
+        "reason": analysis["reason"],
+        "needs_review": analysis["needs_review"],
+        "emergency": analysis["emergency"],
     }
 
 
@@ -565,31 +797,80 @@ def analyze_preview():
 @roles_required("citizen", "department_head", "staff", "admin")
 def track_complaint(complaint_id):
     user = current_user()
-    complaint = Complaint.query.get_or_404(complaint_id)
+    complaint = db.get_or_404(Complaint, complaint_id)
 
     if user.role == "citizen" and complaint.citizen_id != user.id:
         abort(403)
-    if user.role == "department_head" and (
-        not user.department or not department_complaints_query(user.department).filter_by(id=complaint.id).first()
-    ):
+    if normalize_role(user.role) == "department_head" and not department_can_view_complaint(user.department, complaint):
         abort(403)
     if user.role == "staff" and complaint.assigned_staff_id != user.id:
         abort(403)
 
-    return render_template("track_complaint.html", complaint=complaint, status_history=complaint.status_history)
+    return render_template(
+        "track_complaint.html",
+        complaint=complaint,
+        linked_departments=sorted(
+            {row.department.name for row in complaint.department_assignments if row.department}
+            | ({complaint.department.name} if complaint.department else set())
+        ),
+        multi_department_review=complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY,
+        status_history=complaint.status_history,
+        analysis=analyze_complaint(complaint.complaint_text),
+    )
 
 
 @app.route("/officer-dashboard")
 @roles_required("department_head")
 def officer_dashboard():
     user = current_user()
-    complaints = department_complaints_query(user.department).order_by(Complaint.created_date.desc()).all() if user.department else []
+    queue_filter = request.args.get("queue", "active")
+    complaints_query = department_complaints_query(user.department) if user.department else Complaint.query.filter(False)
+    if queue_filter == "ignored":
+        complaints_query = complaints_query.filter_by(status="Ignored")
+    else:
+        complaints_query = complaints_query.filter(Complaint.status != "Ignored")
+    complaints = complaints_query.all()
+    if user.department:
+        complaints = [
+            complaint for complaint in complaints
+            if department_can_view_complaint(user.department, complaint)
+        ]
+    staff_members = User.query.filter_by(role="staff", department_id=user.department_id).order_by(User.name).all() if user.department_id else []
+    staff_workloads = {
+        staff.id: Complaint.query.filter_by(assigned_staff_id=staff.id)
+        .filter(Complaint.status.notin_(["Resolved", "Ignored"]))
+        .count()
+        for staff in staff_members
+    }
+    recommendation_artifact = load_model_artifact(
+        os.getenv("SPSFRMS_STAFF_MODEL_PATH", "")
+    )
+    recommendations_by_id = {
+        complaint.id: recommend_staff(
+            complaint.complaint_text,
+            complaint.category,
+            user.department_id,
+            staff_members,
+            staff_workloads,
+            recommendation_artifact,
+        )
+        for complaint in complaints
+        if (department_can_manage_complaint(user.department, complaint)
+            and complaint.status in {"Submitted", "Assigned"})
+    }
     return render_staff_dashboard(
         complaints,
         dashboard_role="department head",
         can_assign=True,
         department=user.department,
-        staff_members=User.query.filter_by(role="staff", department_id=user.department_id).order_by(User.name).all() if user.department_id else [],
+        staff_members=staff_members,
+        staff_workloads=staff_workloads,
+        recommendations_by_id=recommendations_by_id,
+        queue_filter=queue_filter,
+        can_manage_by_id={
+            complaint.id: department_can_manage_complaint(user.department, complaint)
+            for complaint in complaints
+        },
     )
 
 
@@ -597,11 +878,16 @@ def officer_dashboard():
 @roles_required("staff")
 def staff_dashboard():
     user = current_user()
-    complaints = Complaint.query.filter_by(assigned_staff_id=user.id).order_by(Complaint.created_date.desc()).all()
+    complaints = Complaint.query.filter_by(assigned_staff_id=user.id).filter(Complaint.status != "Ignored").all()
     return render_staff_dashboard(complaints, dashboard_role="staff", can_assign=False, department=user.department)
 
 
-def render_staff_dashboard(complaints, dashboard_role, can_assign, department=None, staff_members=None, dashboard_title="Complaint response desk"):
+def render_staff_dashboard(complaints, dashboard_role, can_assign, department=None, staff_members=None,
+                          staff_workloads=None, queue_filter="active", dashboard_title="Complaint response desk",
+                          can_manage_by_id=None, recommendations_by_id=None):
+    complaints = sorted(complaints, key=priority_order_key)
+    analysis_by_id = {c.id: analyze_complaint(c.complaint_text) for c in complaints}
+    age_by_id = {c.id: complaint_age_label(c.created_date) for c in complaints}
     new_count = sum(c.status == "Submitted" for c in complaints)
     in_progress = sum(c.status in ["Under Review", "In Progress"] for c in complaints)
     resolved = sum(c.status == "Resolved" for c in complaints)
@@ -618,7 +904,14 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
         dashboard_title=dashboard_title,
         department=department,
         can_assign=can_assign,
+        can_manage_by_id=can_manage_by_id or {},
+        multi_department_review_category=MULTI_DEPARTMENT_LEGACY_CATEGORY,
         staff_members=staff_members or [],
+        staff_workloads=staff_workloads or {},
+        recommendations_by_id=recommendations_by_id or {},
+        analysis_by_id=analysis_by_id,
+        age_by_id=age_by_id,
+        queue_filter=queue_filter,
     )
 
 
@@ -626,14 +919,19 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
 @roles_required("staff", "admin")
 def update_status(complaint_id):
     user = current_user()
-    complaint = Complaint.query.get_or_404(complaint_id)
+    complaint = db.get_or_404(Complaint, complaint_id)
+    if complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY:
+        abort(403)
     if user.role == "staff" and complaint.assigned_staff_id != user.id:
         abort(403)
+    if complaint.status == "Ignored":
+        flash("This complaint is ignored. Restore it before changing its status.", "warning")
+        return _status_redirect(complaint)
     new_status = request.form.get("status")
 
     if new_status == "In Progress" and complaint.status == "In Progress":
         flash(f"CMP{complaint.id:03d} is already In Progress.", "info")
-        return redirect_by_role()
+        return _status_redirect(complaint)
 
     starting_statuses = {"Submitted", "Assigned"}
     if not (
@@ -641,12 +939,12 @@ def update_status(complaint_id):
         or new_status == "Resolved" and complaint.status == "In Progress"
     ):
         flash("That status change is not available for this complaint.", "warning")
-        return redirect_by_role()
+        return _status_redirect(complaint)
 
     remarks = request.form.get("remarks", "").strip()
     if new_status == "Resolved" and not remarks:
         flash("Add a resolution note before marking this complaint resolved.", "danger")
-        return redirect(url_for("track_complaint", complaint_id=complaint.id) if request.form.get("return_to") == "track" else url_for("staff_dashboard"))
+        return _status_redirect(complaint)
 
     old_status = complaint.status
     complaint.status = new_status
@@ -657,11 +955,18 @@ def update_status(complaint_id):
         old_status=old_status,
         new_status=new_status,
         updated_by=user.id,
+        timestamp=utcnow(),
         remarks=remarks or None,
     ))
     db.session.commit()
     flash(f"CMP{complaint.id:03d} status updated to {new_status}.", "success")
 
+    return _status_redirect(complaint)
+
+
+def _status_redirect(complaint):
+    if request.form.get("return_to") == "track":
+        return redirect(url_for("track_complaint", complaint_id=complaint.id))
     return redirect_by_role()
 
 
@@ -722,19 +1027,31 @@ def admin_manage():
         return redirect(url_for("admin_dashboard"))
 
     if action == "create_user":
+        if not valid_csrf_token(request.form.get("csrf_token", "")):
+            abort(400, description="Invalid or missing CSRF token.")
         name = request.form.get("name", "").strip()
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         phone = request.form.get("phone", "").strip()
         password = request.form.get("password", "")
         role = request.form.get("role", "")
         department = db.session.get(Department, request.form.get("department_id", type=int))
-        if not name or not email or not phone or len(password) < 8 or role not in {"department_head", "staff"} or not department:
-            flash("Enter valid account details, a department, and a password of at least 8 characters.", "danger")
-        elif User.query.filter_by(email=email).first():
+        if (not name or not email or not phone
+                or not password_meets_policy(password, MIN_NEW_ACCOUNT_PASSWORD_LENGTH)
+                or role not in {"department_head", "staff"} or not department):
+            flash("Enter valid account details, a department, and a password of at least 12 characters.", "danger")
+        elif find_user_by_email(email):
             flash("That email is already registered.", "warning")
         elif role == "department_head" and department.head_id:
             flash("This department already has a department head.", "warning")
         else:
+            try:
+                require_unique_passwords(
+                    [password],
+                    (row[0] for row in User.query.with_entities(User.password).all()),
+                )
+            except ValueError:
+                flash("Use a unique password that is not assigned to another account.", "danger")
+                return redirect(url_for("admin_dashboard"))
             user = User(
                 name=name,
                 email=email,
@@ -749,6 +1066,28 @@ def admin_manage():
                 department.head_id = user.id
             db.session.commit()
             flash(f"{role.replace('_', ' ').title()} account created.", "success")
+        return redirect(url_for("admin_dashboard"))
+
+    if action == "reset_password":
+        if not valid_csrf_token(request.form.get("csrf_token", "")):
+            abort(400, description="Invalid or missing CSRF token.")
+
+        target_id = request.form.get("user_id", type=int)
+        target = db.session.get(User, target_id) if target_id else None
+        if not target or normalize_role(target.role) not in {"department_head", "staff"}:
+            flash("Select a valid staff or department-head account.", "danger")
+            return redirect(url_for("admin_dashboard"))
+
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        if not password_meets_policy(new_password, MIN_NEW_ACCOUNT_PASSWORD_LENGTH):
+            flash("Password must be at least 12 characters long.", "danger")
+        elif new_password != confirm_password:
+            flash("The password entries do not match.", "danger")
+        else:
+            target.password = generate_password_hash(new_password)
+            db.session.commit()
+            flash(f"Password updated for {target.name}.", "success")
         return redirect(url_for("admin_dashboard"))
 
     if action == "assign_user":
@@ -770,22 +1109,40 @@ def admin_manage():
             flash(f"{user.name}'s role and department were updated.", "success")
         return redirect(url_for("admin_dashboard"))
 
-    abort(400)
+    flash("Choose a valid account-management action.", "warning")
+    return redirect(url_for("admin_dashboard"))
 
 
 @app.route("/assign-complaint/<int:complaint_id>", methods=["POST"])
 @roles_required("department_head")
 def assign_complaint(complaint_id):
     head = current_user()
-    complaint = Complaint.query.get_or_404(complaint_id)
-    if not head.department or not department_complaints_query(head.department).filter_by(id=complaint.id).first():
+    if not valid_csrf_token(request.form.get("csrf_token", "")):
+        abort(400, description="Invalid or missing CSRF token.")
+    complaint = db.get_or_404(Complaint, complaint_id)
+    if not department_can_manage_complaint(head.department, complaint):
         abort(403)
     if complaint.status == "Resolved":
-        abort(400)
+        flash("Resolved complaints cannot be assigned or reassigned.", "warning")
+        return redirect(url_for("officer_dashboard"))
+    if complaint.status == "Ignored":
+        flash("Restore this complaint before assigning staff.", "warning")
+        return redirect(url_for("officer_dashboard", queue="ignored"))
+    if complaint.status not in {"Submitted", "Assigned"}:
+        flash("Staff can only be assigned before work starts.", "warning")
+        return redirect(url_for("officer_dashboard"))
 
-    staff = db.session.get(User, request.form.get("staff_id", type=int))
-    if not staff or staff.role != "staff" or staff.department_id != head.department_id:
+    staff_id = request.form.get("staff_id", type=int)
+    staff = db.session.get(User, staff_id) if staff_id is not None else None
+    if not staff:
+        flash("Select an available staff account.", "danger")
+        return redirect(url_for("officer_dashboard"))
+    if staff.role != "staff" or staff.department_id != head.department_id:
         abort(403)
+
+    if complaint.status == "Assigned" and complaint.assigned_staff_id == staff.id:
+        flash(f"CMP{complaint.id:03d} is already assigned to {staff.name}.", "info")
+        return redirect(url_for("officer_dashboard"))
 
     previous_status = complaint.status
     complaint.assigned_staff_id = staff.id
@@ -803,6 +1160,7 @@ def assign_complaint(complaint_id):
             old_status=previous_status,
             new_status="Assigned",
             updated_by=head.id,
+            timestamp=utcnow(),
             remarks=request.form.get("remarks", "").strip() or f"Assigned to {staff.name}.",
         ))
     db.session.commit()
@@ -810,21 +1168,124 @@ def assign_complaint(complaint_id):
     return redirect(url_for("officer_dashboard"))
 
 
+@app.route("/ignore-complaint/<int:complaint_id>", methods=["POST"])
+@roles_required("department_head")
+def ignore_complaint(complaint_id):
+    head = current_user()
+    if not valid_csrf_token(request.form.get("csrf_token", "")):
+        abort(400, description="Invalid or missing CSRF token.")
+    complaint = db.get_or_404(Complaint, complaint_id)
+    if not department_can_manage_complaint(head.department, complaint):
+        abort(403)
+    if complaint.status not in {"Submitted", "Under Review", "Assigned", "In Progress"}:
+        flash("Only active complaints can be ignored.", "warning")
+        return redirect(url_for("officer_dashboard"))
+    reason = request.form.get("reason", "").strip()[:1000]
+    if not reason:
+        flash("Enter a reason before ignoring this complaint.", "danger")
+        return redirect(url_for("officer_dashboard"))
+    previous_status = complaint.status
+    complaint.status = "Ignored"
+    db.session.add(ComplaintStatusHistory(
+        complaint_id=complaint.id,
+        old_status=previous_status,
+        new_status="Ignored",
+        updated_by=head.id,
+        timestamp=utcnow(),
+        remarks=reason,
+    ))
+    db.session.commit()
+    flash(f"CMP{complaint.id:03d} moved to the ignored queue.", "success")
+    return redirect(url_for("officer_dashboard"))
+
+
+@app.route("/restore-complaint/<int:complaint_id>", methods=["POST"])
+@roles_required("department_head")
+def restore_complaint(complaint_id):
+    head = current_user()
+    if not valid_csrf_token(request.form.get("csrf_token", "")):
+        abort(400, description="Invalid or missing CSRF token.")
+    complaint = db.get_or_404(Complaint, complaint_id)
+    if not department_can_manage_complaint(head.department, complaint):
+        abort(403)
+    if complaint.status != "Ignored":
+        flash("This complaint is not in the ignored queue.", "warning")
+        return redirect(url_for("officer_dashboard"))
+    ignored_event = ComplaintStatusHistory.query.filter_by(
+        complaint_id=complaint.id, new_status="Ignored"
+    ).order_by(ComplaintStatusHistory.timestamp.desc(), ComplaintStatusHistory.id.desc()).first()
+    valid_restore_statuses = {"Submitted", "Under Review", "Assigned", "In Progress"}
+    restored_status = (
+        ignored_event.old_status
+        if ignored_event and ignored_event.old_status in valid_restore_statuses
+        else "Submitted"
+    )
+    complaint.status = restored_status
+    db.session.add(ComplaintStatusHistory(
+        complaint_id=complaint.id,
+        old_status="Ignored",
+        new_status=restored_status,
+        updated_by=head.id,
+        timestamp=utcnow(),
+        remarks="Restored by department head.",
+    ))
+    db.session.commit()
+    flash(f"CMP{complaint.id:03d} restored to the active queue.", "success")
+    return redirect(url_for("officer_dashboard"))
+
+
 @app.route("/health")
 def health():
+    initialization = app.config.get("DATABASE_INITIALIZATION_STATE", "not_run")
     try:
         db.session.execute(db.text("SELECT 1"))
-        return {"status": "ok", "database": "connected"}, 200
     except Exception as error:
-        return {"status": "error", "database": "not connected", "message": str(error)}, 500
+        app.logger.error("Database health check failed (%s).", type(error).__name__)
+        return {
+            "status": "error",
+            "database": "not connected",
+            "initialization": initialization,
+        }, 503
+
+    if initialization == "initialized":
+        return {"status": "ok", "database": "connected", "initialization": initialization}, 200
+    return {"status": "degraded", "database": "connected", "initialization": initialization}, 503
 
 
-with app.app_context():
-    try:
-        initialize_database()
-        create_demo_users()
-    except Exception as startup_error:
-        print("Database setup skipped:", startup_error)
+def startup_database_mode():
+    """Read explicit startup mode; default to no database initialization."""
+    configured_mode = os.getenv("SPSFRMS_STARTUP_MODE")
+    if configured_mode is not None:
+        return configured_mode.strip().lower()
+    if os.getenv("SPSFRMS_SKIP_STARTUP_DB_INIT") == "1":
+        return "skip"
+    return "skip"
+
+
+def run_startup_database_setup():
+    """Run only when explicitly invoked with SPSFRMS_STARTUP_MODE=initialize."""
+    mode = startup_database_mode()
+    if mode == "skip":
+        app.config["DATABASE_INITIALIZATION_STATE"] = "not_run"
+        return
+    if mode != "initialize":
+        app.config["DATABASE_INITIALIZATION_STATE"] = "configuration_error"
+        app.logger.error("Invalid SPSFRMS_STARTUP_MODE; expected 'initialize' or 'skip'.")
+        return
+
+    app.config["DATABASE_INITIALIZATION_STATE"] = "pending"
+    with app.app_context():
+        try:
+            initialize_database()
+            create_demo_users()
+            app.config["DATABASE_INITIALIZATION_STATE"] = "initialized"
+        except Exception as startup_error:
+            app.config["DATABASE_INITIALIZATION_STATE"] = "failed"
+            app.logger.error("Database startup setup failed (%s).", type(startup_error).__name__)
+            try:
+                db.session.rollback()
+            except Exception as rollback_error:
+                app.logger.error("Database startup rollback failed (%s).", type(rollback_error).__name__)
 
 
 if __name__ == "__main__":

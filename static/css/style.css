@@ -173,6 +173,19 @@ main { flex: 1; }
     .ambient-bg { --px: 0 !important; --py: 0 !important; }
 }
 
+.password-reset-box {
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md, 14px);
+    background: var(--surface-soft, rgba(255, 255, 255, .025));
+}
+
+.assign-modal { color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); }
+.assign-modal .modal-header { border-bottom-color: var(--border); }
+.analysis-reason { max-width: 250px; white-space: normal; line-height: 1.4; }
+.cell-sub { display: block; }
+.queue-tabs { border-bottom: 1px solid var(--border); }
+
 h1, h2, h3, h4 { color: var(--text); letter-spacing: -.025em; font-weight: 700; }
 a { color: var(--blue); text-decoration: none; transition: color .2s var(--ease); }
 a:hover { color: #79b8ff; }
