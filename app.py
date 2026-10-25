@@ -9,7 +9,17 @@ from secrets import token_urlsafe
 from hmac import compare_digest
 from zoneinfo import ZoneInfo
 from database_config import environment_database_url
-from workflow_routing import CATEGORY_DEPARTMENTS, LEGACY_DEPARTMENT_NAMES, MULTI_DEPARTMENT_LEGACY_CATEGORY
+from workflow_routing import (
+    CATEGORY_DEPARTMENTS,
+    CLASSIFICATION_RULES,
+    HIGH_PRIORITY_WORDS,
+    LEGACY_DEPARTMENT_NAMES,
+    MEDIUM_PRIORITY_WORDS,
+    MULTI_DEPARTMENT_LEGACY_CATEGORY,
+    analyze_complaint,
+    contains_word,
+    matched_rule_terms,
+)
 from password_policy import require_unique_passwords
 from password_policy import (
     MIN_NEW_ACCOUNT_PASSWORD_LENGTH,
@@ -25,7 +35,6 @@ from assignment_audit_models import (
 )
 import json
 import os
-import re
 
 load_dotenv()
 
@@ -191,115 +200,6 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-CLASSIFICATION_RULES = {
-    "Drainage": [
-        ("drainage", 4), ("drain", 4), ("sewer", 3), ("sewage", 3),
-        ("manhole", 3), ("waterlogging", 3), ("storm drain", 4),
-        ("blocked drain", 5), ("drain overflow", 5), ("overflowing drain", 5),
-        ("water overflowing onto road", 4), ("overflowing water onto road", 4),
-    ],
-    "Water Leakage": [
-        ("water leak", 4), ("water leaking", 4), ("water leakage", 4), ("leaking pipe", 4),
-        ("burst pipe", 4), ("pipe burst", 4), ("water pipe", 2),
-    ],
-    "Water Supply": [
-        ("contaminated drinking water", 6), ("contaminated water", 5),
-        ("unsafe drinking water", 6), ("dirty drinking water", 6),
-        ("drinking water", 4), ("water supply", 4), ("tap water", 3),
-        ("no water", 3), ("low water pressure", 4),
-    ],
-    "Public Health": [
-        ("disease outbreak", 6), ("epidemic", 5), ("dengue", 5),
-        ("malaria", 5), ("food poisoning", 5), ("mosquito breeding", 5),
-        ("public health", 4),
-    ],
-    "Street Light": [("street light", 4), ("streetlight", 4), ("lamp post", 3), ("lamp", 2)],
-    "Road Damage": [("pothole", 4), ("broken road", 4), ("road crack", 3), ("road damage", 4),
-                    ("footpath", 2), ("pavement", 2), ("speed breaker", 2), ("road", 1)],
-    "Garbage": [("garbage", 3), ("waste", 2), ("trash", 3), ("dump", 2), ("litter", 2), ("rubbish", 2)],
-    "Electricity": [("live wire", 5), ("electric shock", 5), ("electricity", 3), ("power outage", 3),
-                    ("transformer", 3), ("electric", 2), ("wire", 1), ("current", 1)],
-    "Traffic": [("traffic signal", 4), ("traffic", 3), ("vehicle", 1), ("congestion", 2), ("traffic jam", 3)],
-    "Fire": [("fire", 5), ("smoke", 3), ("burning", 3), ("flame", 3)],
-}
-HIGH_PRIORITY_WORDS = [
-    "fire", "accident", "emergency", "electric shock", "live wire", "collapse",
-    "explosion", "gas leak", "injured", "injury", "trapped", "rescue",
-]
-MEDIUM_PRIORITY_WORDS = [
-    "broken", "leak", "blocked", "damage", "traffic", "pothole", "overflow", "overflowing",
-    "difficulty", "unsafe", "sewage", "not working", "contaminated",
-]
-
-
-def contains_word(text, word):
-    """Match a complete phrase, avoiding substring matches such as road/broad."""
-    phrase = r"\s+".join(re.escape(part) for part in word.split())
-    return re.search(r"(?<!\w)" + phrase + r"(?!\w)", text, re.IGNORECASE) is not None
-
-
-def matched_rule_terms(text, rules):
-    """Return longest non-overlapping rule phrases so synonyms don't double-count."""
-    candidates = []
-    for phrase, weight in rules:
-        pattern = r"(?<!\w)" + r"\s+".join(re.escape(part) for part in phrase.split()) + r"(?!\w)"
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            candidates.append((match.start(), match.end(), phrase, weight))
-    candidates.sort(key=lambda match: (-(match[1] - match[0]), -match[3], match[0]))
-    selected = []
-    for candidate in candidates:
-        start, end, _, _ = candidate
-        if not any(start < existing_end and end > existing_start for existing_start, existing_end, _, _ in selected):
-            selected.append(candidate)
-    return [(phrase, weight) for _, _, phrase, weight in sorted(selected)]
-
-
-def analyze_complaint(text):
-    """Apply transparent phrase rules; this is not a trained ML model."""
-    normalized = (text or "").lower()
-    scores = {}
-    matches_by_category = {}
-    for category, rules in CLASSIFICATION_RULES.items():
-        matches = matched_rule_terms(normalized, rules)
-        scores[category] = sum(weight for _, weight in matches)
-        matches_by_category[category] = [phrase for phrase, _ in matches]
-
-    top_score = max(scores.values(), default=0)
-    top_categories = [category for category, score in scores.items() if score == top_score and score > 0]
-    strong_categories = [category for category, score in scores.items() if score >= 3]
-    ambiguous = len(strong_categories) > 1 or (top_score >= 3 and len(top_categories) > 1)
-    category = top_categories[0] if len(top_categories) == 1 and top_score >= 3 and not ambiguous else "Other"
-    keywords = list(dict.fromkeys(
-        phrase for name, matches in matches_by_category.items()
-        if name == category or ambiguous or category == "Other"
-        for phrase in matches
-    ))
-    needs_review = ambiguous or top_score < 3
-    department = CATEGORY_DEPARTMENTS[category]
-    if needs_review:
-        reason = "The description is ambiguous or does not match a specific rule; routed to the Public Health review queue for human confirmation."
-    else:
-        reason = f"The description matched {', '.join(matches_by_category[category])}; {category} reports go to {department}."
-
-    emergency = any(contains_word(normalized, word) for word in HIGH_PRIORITY_WORDS)
-    if emergency:
-        priority = "High"
-    elif any(contains_word(normalized, word) for word in MEDIUM_PRIORITY_WORDS):
-        priority = "Medium"
-    else:
-        priority = "Low"
-    return {
-        "keywords": keywords,
-        "category": category,
-        "priority": priority,
-        "department": department,
-        "reason": reason,
-        "needs_review": needs_review,
-        "emergency": emergency,
-    }
-
-
 def analyze_text(text):
     """Compatibility wrapper for callers that need the original three values."""
     result = analyze_complaint(text)
@@ -407,6 +307,35 @@ def department_complaints_query(department):
     return Complaint.query.filter(db.or_(*clauses))
 
 
+def resolve_analysis_departments(analysis):
+    """Resolve every analyzer route to one unambiguous configured DB record."""
+    primary_name = analysis.get("department")
+    requested = analysis.get("departments")
+    if not isinstance(primary_name, str) or not primary_name.strip():
+        return None
+    if not isinstance(requested, (list, tuple)):
+        requested = [primary_name]
+    names = []
+    for name in [primary_name, *requested]:
+        if not isinstance(name, str) or not name.strip():
+            return None
+        normalized = name.strip().casefold()
+        if normalized not in names:
+            names.append(normalized)
+    if primary_name.strip().casefold() not in names:
+        return None
+
+    records = Department.query.filter(db.func.lower(Department.name).in_(names)).all()
+    by_name = {}
+    for record in records:
+        by_name.setdefault(record.name.strip().casefold(), []).append(record)
+    if any(len(by_name.get(name, [])) != 1 for name in names):
+        return None
+    primary = by_name[primary_name.strip().casefold()][0]
+    secondary = [by_name[name][0] for name in names if name != primary.name.strip().casefold()]
+    return primary, secondary
+
+
 def department_can_view_complaint(department, complaint):
     """Authorize read access through canonical routing or explicit department links."""
     if not department:
@@ -414,7 +343,10 @@ def department_can_view_complaint(department, complaint):
     if complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY:
         return bool(department_complaints_query(department).filter_by(id=complaint.id).first())
     canonical_name = CATEGORY_DEPARTMENTS.get(complaint.category)
-    if canonical_name and department.name != canonical_name:
+    if (canonical_name and department.name.casefold() != canonical_name.casefold()
+            and not ComplaintDepartment.query.filter_by(
+                complaint_id=complaint.id, department_id=department.id,
+            ).first()):
         return False
     return bool(department_complaints_query(department).filter_by(id=complaint.id).first())
 
@@ -422,6 +354,9 @@ def department_can_view_complaint(department, complaint):
 def department_can_manage_complaint(department, complaint):
     """Authorize workflow changes only where one department owns the workflow."""
     if complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY:
+        return False
+    canonical_name = CATEGORY_DEPARTMENTS.get(complaint.category)
+    if not department or not canonical_name or department.name.casefold() != canonical_name.casefold():
         return False
     return department_can_view_complaint(department, complaint)
 
@@ -718,12 +653,11 @@ def submit_complaint():
         priority = analysis["priority"]
         keywords = analysis["keywords"]
 
-        department = Department.query.filter(
-            db.func.lower(Department.name) == analysis["department"].lower()
-        ).first()
-        if department is None:
-            flash("The responsible department is unavailable. Please try again later.", "danger")
+        resolved_departments = resolve_analysis_departments(analysis)
+        if resolved_departments is None:
+            flash("One or more responsible departments are unavailable. Please try again later.", "danger")
             return render_template("submit_complaint.html", form=request.form)
+        department, secondary_departments = resolved_departments
 
         image_name = None
         file = request.files.get("image")
@@ -754,6 +688,10 @@ def submit_complaint():
 
         db.session.add(complaint)
         db.session.flush()
+        db.session.add_all([
+            ComplaintDepartment(complaint_id=complaint.id, department_id=linked.id)
+            for linked in secondary_departments
+        ])
         db.session.add(ComplaintStatusHistory(
             complaint_id=complaint.id,
             old_status=None,
@@ -785,8 +723,12 @@ def analyze_preview():
     return {
         "keywords": analysis["keywords"],
         "category": analysis["category"],
+        "categories": analysis["categories"],
+        "secondary_categories": analysis["secondary_categories"],
         "priority": analysis["priority"],
         "department": analysis["department"],
+        "departments": analysis["departments"],
+        "secondary_departments": analysis["secondary_departments"],
         "reason": analysis["reason"],
         "needs_review": analysis["needs_review"],
         "emergency": analysis["emergency"],
@@ -887,6 +829,12 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
                           can_manage_by_id=None, recommendations_by_id=None):
     complaints = sorted(complaints, key=priority_order_key)
     analysis_by_id = {c.id: analyze_complaint(c.complaint_text) for c in complaints}
+    linked_departments_by_id = {}
+    for complaint in complaints:
+        names = {row.department.name for row in complaint.department_assignments if row.department}
+        if complaint.department:
+            names.add(complaint.department.name)
+        linked_departments_by_id[complaint.id] = sorted(names)
     age_by_id = {c.id: complaint_age_label(c.created_date) for c in complaints}
     new_count = sum(c.status == "Submitted" for c in complaints)
     in_progress = sum(c.status in ["Under Review", "In Progress"] for c in complaints)
@@ -910,6 +858,7 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
         staff_workloads=staff_workloads or {},
         recommendations_by_id=recommendations_by_id or {},
         analysis_by_id=analysis_by_id,
+        linked_departments_by_id=linked_departments_by_id,
         age_by_id=age_by_id,
         queue_filter=queue_filter,
     )

@@ -41,6 +41,7 @@
             category: document.getElementById('resultCategory'),
             priority: document.getElementById('resultPriority'),
             department: document.getElementById('resultDepartment'),
+            departments: document.getElementById('resultDepartments'),
             keywords: document.getElementById('resultKeywords'),
             reason: document.getElementById('resultReason'),
             review: document.getElementById('resultReview'),
@@ -53,6 +54,7 @@
             els.category.textContent = '—';
             els.priority.textContent = '—';
             els.department.textContent = '—';
+            if (els.departments) els.departments.textContent = '—';
             els.keywords.textContent = '—';
             if (els.reason) els.reason.textContent = 'The department explanation will appear as you describe the issue.';
             if (els.review) els.review.hidden = true;
@@ -62,6 +64,10 @@
             els.state.textContent = 'analysis complete';
             els.category.textContent = data.category;
             els.department.textContent = data.department;
+            if (els.departments) {
+                const departments = Array.isArray(data.departments) ? data.departments : [data.department];
+                els.departments.textContent = departments.join(', ');
+            }
             if (els.reason) els.reason.textContent = data.reason || '';
             if (els.review) els.review.hidden = !data.needs_review;
 

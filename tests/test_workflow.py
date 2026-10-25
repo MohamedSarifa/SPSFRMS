@@ -195,6 +195,60 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
         self.assertEqual(result["category"], "Water Supply")
         self.assertEqual(result["department"], "Water Supply")
 
+    def test_road_damage_does_not_route_to_public_health(self):
+        result = analyze_complaint(
+            "The main road has several large potholes and the damaged road surface needs immediate repair."
+        )
+        self.assertIn("Road Damage", result["categories"])
+        self.assertIn("Road Maintenance", result["departments"])
+        self.assertNotIn("Public Health", result["departments"])
+
+    def test_water_supply_only_does_not_route_to_road_maintenance(self):
+        result = analyze_complaint(
+            "Our area has not received municipal drinking water for four days. Please restore the water supply."
+        )
+        self.assertIn("Water Supply", result["categories"])
+        self.assertEqual(result["departments"], ["Water Supply"])
+        self.assertNotIn("Road Maintenance", result["departments"])
+
+    def test_drainage_only_routes_to_drainage(self):
+        result = analyze_complaint(
+            "The drainage channel is blocked and sewage water is overflowing onto the street."
+        )
+        self.assertIn("Drainage", result["categories"])
+        self.assertIn("Drainage", result["departments"])
+        self.assertNotIn("Road Maintenance", result["departments"])
+
+    def test_multi_issue_description_selects_all_supported_departments_once(self):
+        result = analyze_complaint(
+            "Sewage water is leaking near the drinking water pipeline. The water supplied to our houses "
+            "has a bad smell, and dirty water is collecting on the street. Please repair the pipeline, "
+            "clear the drainage and check the drinking water quality."
+        )
+        self.assertTrue(result["needs_review"])
+        self.assertEqual(
+            set(result["departments"]),
+            {"Water Supply", "Drainage", "Public Health"},
+        )
+        self.assertEqual(len(result["departments"]), len(set(result["departments"])))
+        self.assertEqual(result["department"], result["departments"][0])
+
+    def test_road_damage_and_drainage_are_both_detected(self):
+        result = analyze_complaint(
+            "The road is full of potholes, and the drainage water is overflowing onto the damaged road."
+        )
+        self.assertIn("Road Maintenance", result["departments"])
+        self.assertIn("Drainage", result["departments"])
+        self.assertNotIn("Public Health", result["departments"])
+
+    def test_public_health_issue_does_not_force_road_or_water_supply(self):
+        result = analyze_complaint(
+            "Garbage has accumulated near the public park and mosquitoes are breeding there, creating a health risk."
+        )
+        self.assertIn("Public Health", result["departments"])
+        self.assertNotIn("Road Maintenance", result["departments"])
+        self.assertNotIn("Water Supply", result["departments"])
+
     def test_streetlight_road_garbage_fire_and_public_health_rules(self):
         cases = [
             ("Street light is not working", "Street Light"),
@@ -218,7 +272,10 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
             "Drainage is overflowing and drinking water is contaminated near the road."
         )
         self.assertTrue(result["needs_review"])
-        self.assertEqual(result["category"], "Other")
+        self.assertIn("Drainage", result["categories"])
+        self.assertIn("Water Supply", result["categories"])
+        self.assertIn("Drainage", result["departments"])
+        self.assertIn("Water Supply", result["departments"])
 
     def test_priority_order_is_emergency_priority_then_age_then_id(self):
         older = Complaint(id=10, complaint_text="pothole", priority="High", created_date=utcnow() - timedelta(days=2))
@@ -270,6 +327,38 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
         self.login_as("unlinked_head")
         self.assertNotIn(f"CMP{complaint_id:03d}".encode(), self.client.get("/officer-dashboard").data)
         self.assertEqual(self.client.get(f"/track-complaint/{complaint_id}").status_code, 403)
+
+    def test_linked_secondary_department_can_view_but_not_manage_new_routed_complaint(self):
+        with app.app_context():
+            complaint = Complaint(
+                complaint_text="Drainage overflow with a linked public safety issue",
+                category="Drainage", location="Fixture location", priority="Medium",
+                status="Submitted", citizen_id=self.ids["citizen"],
+                department_id=self.department_ids["Drainage"],
+            )
+            complaint.department_assignments.append(ComplaintDepartment(
+                department_id=self.department_ids["Police"],
+            ))
+            db.session.add(complaint)
+            db.session.commit()
+            complaint_id = complaint.id
+
+        self.login_as("other_head")
+        dashboard = self.client.get("/officer-dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn(f"CMP{complaint_id:03d}".encode(), dashboard.data)
+        self.assertIn(b"Read-only: this linked department is secondary", dashboard.data)
+        self.assertNotIn(f"assignModal{complaint_id}".encode(), dashboard.data)
+
+        attempted_assignment = self.client.post(
+            f"/assign-complaint/{complaint_id}",
+            data={"csrf_token": "test-csrf", "staff_id": str(self.ids["other_staff"])},
+        )
+        self.assertEqual(attempted_assignment.status_code, 403)
+        with app.app_context():
+            complaint = db.session.get(Complaint, complaint_id)
+            self.assertEqual(complaint.status, "Submitted")
+            self.assertIsNone(complaint.assigned_staff_id)
 
     def test_multi_department_legacy_actions_are_rejected_without_mutation(self):
         active_id = self.make_multi_department_complaint()
@@ -557,6 +646,31 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
             complaint = Complaint.query.order_by(Complaint.id.desc()).first()
             self.assertEqual(complaint.department.name, expected_department)
 
+    def test_multi_department_preview_matches_persisted_primary_and_links(self):
+        self.login_as("citizen")
+        text = (
+            "Sewage water is leaking near the drinking water pipeline. The water supplied to our houses "
+            "has a bad smell, and dirty water is collecting on the street. Please repair the pipeline, "
+            "clear the drainage and check the drinking water quality."
+        )
+        preview = self.client.post("/analyze-preview", json={"text": text})
+        self.assertEqual(preview.status_code, 200)
+        preview_data = preview.get_json()
+        saved = self.client.post("/submit-complaint", data={"complaint_text": text, "location": "Test Road"})
+        self.assertEqual(saved.status_code, 302)
+        with app.app_context():
+            complaint = Complaint.query.order_by(Complaint.id.desc()).first()
+            linked_names = {
+                row.department.name for row in ComplaintDepartment.query.filter_by(complaint_id=complaint.id).all()
+            }
+            self.assertEqual(complaint.category, preview_data["category"])
+            self.assertEqual(complaint.department.name, preview_data["department"])
+            self.assertEqual(
+                linked_names | {complaint.department.name},
+                set(preview_data["departments"]),
+            )
+            self.assertNotIn(complaint.department.name, linked_names)
+
     def test_missing_canonical_department_rejects_before_saving_upload_or_complaint(self):
         self.login_as("citizen")
         with app.app_context():
@@ -564,7 +678,7 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
 
         with app.app_context():
             with patch.object(Department, "query") as department_query:
-                department_query.filter.return_value.first.return_value = None
+                department_query.filter.return_value.all.return_value = []
                 with patch("werkzeug.datastructures.FileStorage.save") as save_upload:
                     response = self.client.post("/submit-complaint", data={
                         "complaint_text": "A blocked drain is causing waterlogging",
@@ -573,7 +687,7 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
                     }, content_type="multipart/form-data")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"The responsible department is unavailable", response.data)
+        self.assertIn(b"One or more responsible departments are unavailable", response.data)
         save_upload.assert_not_called()
         with app.app_context():
             self.assertEqual(Complaint.query.count(), before_count)

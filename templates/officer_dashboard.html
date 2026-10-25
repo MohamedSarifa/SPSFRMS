@@ -46,7 +46,7 @@
                         <tr>
                             <td><a class="cmp-id mono" href="{{ url_for('track_complaint', complaint_id=c.id) }}">CMP{{ "%03d"|format(c.id) }}</a><small class="cell-sub">{{ c.complaint_text|truncate(105, True, '…') }}</small></td>
                             <td>{{ c.citizen.name }}</td>
-                            <td>{{ c.category }}<small class="cell-sub">{{ c.department.name if c.department else 'Needs department review' }}</small><small class="cell-sub analysis-reason">{{ analysis_by_id[c.id].reason }}</small></td>
+                            <td>{{ c.category }}<small class="cell-sub">Primary: {{ c.department.name if c.department else 'Needs department review' }}</small><small class="cell-sub">Relevant departments: {{ linked_departments_by_id.get(c.id, [])|join(', ') }}</small><small class="cell-sub analysis-reason">{{ analysis_by_id[c.id].reason }}</small>{% if analysis_by_id[c.id].needs_review %}<small class="cell-sub text-warning">Human review required.</small>{% endif %}</td>
                             <td><span class="priority {{ c.priority|lower }}">{{ c.priority }}</span>{% if analysis_by_id[c.id].emergency %}<small class="cell-sub text-danger">Emergency signal</small>{% endif %}</td>
                             <td class="cell-location">{{ c.location }}</td>
                             <td><span class="status-badge {{ c.status|lower|replace(' ','-') }}">{{ c.status }}</span></td>
@@ -99,7 +99,7 @@
                                 </form>
                                 {% endif %}
                                 {% else %}
-                                <small class="cell-sub text-warning">Read-only: multiple-department legacy record requires review.</small>
+                                {% if c.category == multi_department_review_category %}<small class="cell-sub text-warning">Read-only: multiple-department legacy record requires review.</small>{% else %}<small class="cell-sub text-warning">Read-only: this linked department is secondary; the primary department manages the workflow.</small>{% endif %}
                                 {% endif %}
                             </td>
                             {% endif %}
