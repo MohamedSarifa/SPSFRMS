@@ -23,14 +23,14 @@
             <div class="panel-head">
                 <div>
                     <h2 id="queueTitle">Complaint queue</h2>
-                    <p>{% if dashboard_role == 'department head' %}Manage assignments for your department; linked departments manage their own work.{% elif dashboard_role == 'administrator' %}Manage assignments across linked departments.{% else %}Update the status of complaints assigned to you.{% endif %}</p>
+                    <p>{% if can_assign %}Assign complaints to staff in your department and update status.{% else %}Update status for complaints available to your account.{% endif %}</p>
                 </div>
                 <div class="input-icon table-search">
                     <i class="bi bi-search" aria-hidden="true"></i>
                     <input type="search" class="form-control form-control-sm" placeholder="Filter complaints" aria-label="Filter complaints" data-table-filter="#queueTable">
                 </div>
             </div>
-            {% if can_assign and dashboard_role == 'department head' %}
+            {% if can_assign %}
             <div class="queue-tabs px-3 pb-3 d-flex gap-2">
                 <a class="btn btn-sm {{ 'btn-accent' if queue_filter != 'ignored' else 'btn-outline-subtle' }}" href="{{ url_for('officer_dashboard', queue='active') }}">Active queue</a>
                 <a class="btn btn-sm {{ 'btn-accent' if queue_filter == 'ignored' else 'btn-outline-subtle' }}" href="{{ url_for('officer_dashboard', queue='ignored') }}">Ignored</a>
@@ -49,55 +49,72 @@
                             <td>{{ c.category }}<small class="cell-sub">Primary: {{ c.department.name if c.department else 'Needs department review' }}</small><small class="cell-sub">Relevant departments: {{ linked_departments_by_id.get(c.id, [])|join(', ') }}</small><small class="cell-sub analysis-reason">{{ analysis_by_id[c.id].reason }}</small>{% if analysis_by_id[c.id].needs_review %}<small class="cell-sub text-warning">Human review required.</small>{% endif %}</td>
                             <td><span class="priority {{ c.priority|lower }}">{{ c.priority }}</span>{% if analysis_by_id[c.id].emergency %}<small class="cell-sub text-danger">Emergency signal</small>{% endif %}</td>
                             <td class="cell-location">{{ c.location }}</td>
-                            {% set overall_status = overall_status_by_complaint.get(c.id, c.status) %}
-                            <td><span class="status-badge {{ overall_status|lower|replace(' ','-') }}">{{ overall_status }}</span></td>
+                            <td><span class="status-badge {{ c.status|lower|replace(' ','-') }}">{{ c.status }}</span></td>
                             {% if can_assign %}
                             <td>
-                                {% for assignment in department_assignment_views_by_complaint.get(c.id, []) %}
-                                <section class="border-bottom py-2">
-                                    <strong>{{ assignment.department.name }}</strong>
-                                    <span class="status-badge {{ assignment.status|lower|replace(' ','-') }}">{{ assignment.status }}</span>
-                                    <small class="cell-sub">{% if assignment.assigned_staff %}Assigned: {{ assignment.assigned_staff.name }} | Workload {{ assignment.workload_by_staff.get(assignment.assigned_staff_id, 0) }}/{{ assignment.max_active_assignments }} active assignments{% if assignment.workload_by_staff.get(assignment.assigned_staff_id, 0) > assignment.max_active_assignments %} (over limit; additional assignments are blocked){% endif %}{% if assignment.staff_assigned_date %} | {{ assignment.staff_assigned_date|kolkata_datetime }}{% endif %}{% else %}Awaiting staff assignment{% endif %}</small>
-                                    {% if assignment.can_manage and assignment.status in ['Submitted', 'Assigned'] and c.status != 'Ignored' %}
-                                        {% set recommendation = assignment.recommendation %}
-                                        {% if recommendation %}<small class="cell-sub">Advisory: {{ recommendation.staff_name }} | {{ recommendation.method_label }}</small>{% endif %}
-                                        {% if assignment.staff_options %}
-                                        <form method="POST" action="{{ url_for('assign_complaint', complaint_id=c.id) }}" class="mt-2">
-                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                            <input type="hidden" name="department_id" value="{{ assignment.department_id }}">
-                                            <label class="form-label" for="staffSelect{{ c.id }}-{{ assignment.department_id }}">Staff in {{ assignment.department.name }}</label>
-                                            <select id="staffSelect{{ c.id }}-{{ assignment.department_id }}" name="staff_id" class="form-select form-select-sm" required>
-                                                <option value="">Choose staff</option>
-                                                {% for staff in assignment.staff_options %}{% set workload = assignment.workload_by_staff.get(staff.id, 0) %}<option value="{{ staff.id }}" {% if assignment.assigned_staff_id == staff.id %}selected{% endif %} {% if workload >= assignment.max_active_assignments and staff.id != assignment.assigned_staff_id %}disabled{% endif %}>{{ staff.name }} | {{ workload }}/{{ assignment.max_active_assignments }} active assignments{{ ' | Recommended' if recommendation and staff.id == recommendation.staff_id else '' }}</option>{% endfor %}
-                                            </select>
-                                            <input class="form-control form-control-sm mt-2" type="text" name="remarks" maxlength="1000" placeholder="Assignment note (optional)">
-                                            <button class="btn btn-accent btn-sm mt-2" type="submit">{{ 'Reassign' if assignment.assigned_staff else 'Assign' }} for {{ assignment.department.name }}</button>
-                                        </form>
-                                        {% if not assignment.has_additional_staff_capacity %}<small class="cell-sub text-warning">No other eligible staff member currently has available capacity.</small>{% endif %}
-                                        {% else %}{% if assignment.staff_options %}<small class="cell-sub text-warning">No eligible staff member currently has available capacity.</small>{% else %}<small class="cell-sub text-muted-2">No active staff in this department.</small>{% endif %}{% endif %}
-                                    {% elif assignment.can_manage and assignment.status == 'Ignored' and assignment.department_id == c.department_id and c.category != multi_department_review_category %}
-                                        <form method="POST" action="{{ url_for('restore_complaint', complaint_id=c.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-subtle btn-sm" type="submit">Restore complaint</button></form>
-                                    {% elif not assignment.can_manage and assignment.status not in ['Resolved', 'Ignored'] %}
-                                        <small class="cell-sub text-warning">Read-only: only this department's head or an administrator can manage this assignment.</small>
-                                    {% endif %}
-                                    {% if dashboard_role == 'department head' and assignment.can_manage and assignment.department_id == c.department_id and c.category != multi_department_review_category and c.status not in ['Resolved', 'Ignored'] %}
-                                    <form method="POST" action="{{ url_for('ignore_complaint', complaint_id=c.id) }}" class="mt-2" onsubmit="return confirm('Move this complaint to the ignored queue? It will not be deleted.');"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input class="form-control form-control-sm mb-1" type="text" name="reason" maxlength="1000" placeholder="Required reason" required><button class="btn btn-ghost btn-sm" type="submit">Ignore complaint</button></form>
-                                    {% endif %}
-                                </section>
-                                {% else %}<small class="text-muted-2">No linked department.</small>{% endfor %}
+                                {% if can_manage_by_id.get(c.id) %}
+                                {% if c.assigned_staff %}<small class="cell-sub mb-2">Currently assigned: {{ c.assigned_staff.name }}</small>{% else %}<small class="cell-sub mb-2">Unassigned</small>{% endif %}
+                                {% if c.status == 'Ignored' %}
+                                <form method="POST" action="{{ url_for('restore_complaint', complaint_id=c.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-subtle btn-sm" type="submit">Restore</button></form>
+                                {% elif c.status == 'Resolved' %}<small class="text-muted-2">Resolved complaints cannot be assigned.</small>
+                                {% elif c.status in ['Submitted', 'Assigned'] %}
+                                <button class="btn btn-outline-subtle btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#assignModal{{ c.id }}">{{ 'Reassign staff' if c.assigned_staff else 'Assign staff' }}</button>
+                                {% if staff_members %}
+                                <div class="modal fade" id="assignModal{{ c.id }}" tabindex="-1" aria-labelledby="assignTitle{{ c.id }}" aria-hidden="true">
+                                    <div class="modal-dialog modal-dialog-centered"><div class="modal-content assign-modal">
+                                        <div class="modal-header"><div><h2 class="modal-title fs-5" id="assignTitle{{ c.id }}">Assign CMP{{ '%03d'|format(c.id) }}</h2><p class="mb-0 small text-muted-2">{{ c.category }} · {{ c.priority }} · {{ c.created_date.strftime('%d %b %Y, %I:%M %p') }}</p></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
+                                        <div class="modal-body"><p>{{ c.complaint_text|truncate(280, True, '…') }}</p><p class="small text-muted-2">Department: {{ c.department.name if c.department else department.name }} · Status: {{ c.status }} · {{ age_by_id[c.id] }}</p>
+                                            <form method="POST" action="{{ url_for('assign_complaint', complaint_id=c.id) }}">
+                                                <label class="form-label" for="staffSelect{{ c.id }}">Eligible staff in {{ department.name }}</label>
+                                                {% set recommendation = recommendations_by_id.get(c.id) %}
+                                                {% if recommendation %}
+                                                <div class="alert alert-info py-2 mb-2">
+                                                    <strong>Recommended: {{ recommendation.staff_name }}</strong>
+                                                    <small class="d-block">{{ recommendation.method_label }} · {{ recommendation.workload }} active complaint(s)</small>
+                                                    {% if recommendation.confidence is not none %}
+                                                    <small class="d-block">Model confidence for a historical assignment match: {{ '%.1f'|format(recommendation.confidence * 100) }}%. This is not a probability of successful resolution.</small>
+                                                    {% endif %}
+                                                </div>
+                                                {% endif %}
+                                                <select id="staffSelect{{ c.id }}" name="staff_id" class="form-select" required>
+                                                    <option value="">Choose staff</option>
+                                                    {% for staff in staff_members %}<option value="{{ staff.id }}" {% if c.assigned_staff_id == staff.id %}selected{% endif %}>{{ staff.name }} — {{ staff_workloads.get(staff.id, 0) }} active complaint(s){{ ' · Recommended' if recommendation and staff.id == recommendation.staff_id else '' }}</option>{% endfor %}
+                                                </select>
+                                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                                <div class="form-text">Recommendations are advisory. Choose a staff member and confirm to assign; no assignment is made automatically.</div>
+                                                <label class="form-label mt-3" for="assignNote{{ c.id }}">Assignment note (optional)</label><input id="assignNote{{ c.id }}" type="text" name="remarks" class="form-control" maxlength="1000">
+                                                <div class="d-flex justify-content-end gap-2 mt-3"><button type="button" class="btn btn-outline-subtle" data-bs-dismiss="modal">Cancel</button><button class="btn btn-accent" type="submit">{{ 'Reassign' if c.assigned_staff else 'Assign' }}</button></div>
+                                            </form>
+                                        </div>
+                                    </div></div>
+                                </div>
+                                {% else %}<small class="cell-sub text-muted-2">No staff in this department.</small>{% endif %}
+                                {% elif c.status not in ['Ignored', 'Resolved'] %}<small class="text-muted-2">Assignment is locked after work starts.</small>
+                                {% endif %}
+                                {% if c.status not in ['Resolved', 'Ignored'] %}
+                                <form method="POST" action="{{ url_for('ignore_complaint', complaint_id=c.id) }}" class="mt-2" onsubmit="return confirm('Move this complaint to the ignored queue? It will not be deleted.');">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <input class="form-control form-control-sm mb-1" type="text" name="reason" maxlength="1000" placeholder="Required reason" aria-label="Required reason for ignoring CMP{{ '%03d'|format(c.id) }}" required>
+                                    <button class="btn btn-ghost btn-sm" type="submit">Ignore</button>
+                                </form>
+                                {% endif %}
+                                {% else %}
+                                {% if c.category == multi_department_review_category %}<small class="cell-sub text-warning">Read-only: multiple-department legacy record requires review.</small>{% else %}<small class="cell-sub text-warning">Read-only: this linked department is secondary; the primary department manages the workflow.</small>{% endif %}
+                                {% endif %}
                             </td>
                             {% endif %}
                             <td class="mono text-muted-2">{{ age_by_id[c.id] }}<small class="cell-sub">{{ c.created_date.strftime('%d %b %Y, %I:%M %p') }}</small></td>
                             {% if dashboard_role == 'staff' %}
                             <td>
-                                {% for assignment in department_assignment_views_by_complaint.get(c.id, []) %}
-                                    {% if assignment.assigned_staff_id == session.get('user_id') %}
-                                        <small class="d-block">{{ assignment.department.name }} | {{ assignment.status }}</small>
-                                        {% if assignment.status in ['Submitted', 'Assigned'] %}<form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="department_id" value="{{ assignment.department_id }}"><input type="hidden" name="status" value="In Progress"><button class="btn btn-outline-subtle btn-sm" type="submit">Start {{ assignment.department.name }} work</button></form>
-                                        {% elif assignment.status == 'In Progress' %}<form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}" class="d-flex flex-column gap-2"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="department_id" value="{{ assignment.department_id }}"><textarea name="remarks" class="form-control form-control-sm" rows="2" placeholder="Resolution note" required></textarea><input type="hidden" name="status" value="Resolved"><button class="btn btn-accent btn-sm" type="submit">Resolve {{ assignment.department.name }}</button></form>
-                                        {% elif assignment.status == 'Resolved' %}<span class="text-muted-2">Completed</span>{% endif %}
-                                    {% endif %}
-                                {% endfor %}
+                                {% if c.category == multi_department_review_category %}
+                                <small class="text-warning">Read-only: multiple-department legacy record requires review.</small>
+                                {% else %}
+                                {% if c.status in ['Submitted', 'Assigned'] %}
+                                <form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}"><input type="hidden" name="status" value="In Progress"><button class="btn btn-outline-subtle btn-sm" type="submit">Start Work</button></form>
+                                {% elif c.status == 'In Progress' %}
+                                <form method="POST" action="{{ url_for('update_status', complaint_id=c.id) }}" class="d-flex flex-column gap-2"><textarea name="remarks" class="form-control form-control-sm" rows="2" placeholder="Resolution note" aria-label="Resolution note for CMP{{ '%03d'|format(c.id) }}" required></textarea><input type="hidden" name="status" value="Resolved"><button class="btn btn-accent btn-sm" type="submit">Mark as Resolved</button></form>
+                                {% elif c.status == 'Resolved' %}<span class="text-muted-2">Completed</span>{% else %}<span class="text-muted-2">Awaiting assignment</span>{% endif %}
+                                {% endif %}
                             </td>
                             {% endif %}
                         </tr>

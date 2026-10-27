@@ -37,14 +37,10 @@
                         <tr>
                             <td><span class="cmp-id mono">CMP{{ "%03d"|format(complaint.id) }}</span><small class="cell-sub">{{ complaint.location }}</small></td>
                             <td>{{ complaint.category }}</td>
-                            <td class="text-muted-2">
-                                {% for assignment in department_states_by_id.get(complaint.id, []) %}
-                                <small class="d-block">{{ assignment.department.name }} · {{ assignment.status }}{% if assignment.assigned_staff %} · {{ assignment.assigned_staff.name }}{% else %} · Awaiting staff assignment{% endif %}</small>
-                                {% else %}Unassigned{% endfor %}
-                            </td>
+                            <td class="text-muted-2">{{ complaint.department.name ~ ' Department' if complaint.department else 'Unassigned' }}</td>
                             <td><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></td>
                             <td class="mono text-muted-2">{{ complaint.created_date.strftime('%d %b %Y') }}</td>
-                            <td><span class="status-badge {{ overall_status_by_id.get(complaint.id, complaint.status)|lower|replace(' ','-') }}">{{ overall_status_by_id.get(complaint.id, complaint.status) }}</span></td>
+                            <td><span class="status-badge {{ complaint.status|lower|replace(' ','-') }}">{{ complaint.status }}</span></td>
                             <td class="text-end"><a class="row-action" href="{{ url_for('track_complaint', complaint_id=complaint.id) }}">Track <i class="bi bi-arrow-up-right" aria-hidden="true"></i></a></td>
                         </tr>
                     {% else %}

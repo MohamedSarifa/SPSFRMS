@@ -37,16 +37,12 @@
                     </div>
 
                     <div class="form-block">
-                        {% if image_uploads_enabled %}
-                            <div class="form-block-head"><span class="mono">03</span><div><h2>Photo evidence <em>optional</em></h2><p>Attach a JPG, JPEG or PNG image (max 10 MB).</p></div></div>
-                            <label class="dropzone" for="imageInput">
-                                <i class="bi bi-cloud-arrow-up" aria-hidden="true"></i>
-                                <span id="imageLabel"><b>Choose an image</b> or drag it here</span>
-                                <input name="image" id="imageInput" type="file" accept=".jpg,.jpeg,.png" class="visually-hidden">
-                            </label>
-                        {% else %}
-                            <div class="form-block-head"><span class="mono">03</span><div><h2>Photo evidence <em>unavailable</em></h2><p>Text-only complaint submission is available on this deployment.</p></div></div>
-                        {% endif %}
+                        <div class="form-block-head"><span class="mono">03</span><div><h2>Photo evidence <em>optional</em></h2><p>Attach a JPG, JPEG or PNG image (max 10 MB).</p></div></div>
+                        <label class="dropzone" for="imageInput">
+                            <i class="bi bi-cloud-arrow-up" aria-hidden="true"></i>
+                            <span id="imageLabel"><b>Choose an image</b> or drag it here</span>
+                            <input name="image" id="imageInput" type="file" accept=".jpg,.jpeg,.png" class="visually-hidden">
+                        </label>
                     </div>
 
                     <div class="form-actions">

@@ -17,18 +17,16 @@
         fetch(url, { headers: { Accept: 'application/json' } })
             .then(res => res.json().then(data => ({ ok: res.ok, data })))
             .then(({ ok, data }) => {
-                if (data.process !== 'running') {
-                    setState('down', 'Service unavailable');
-                } else if (data.database !== 'connected') {
+                if (data.database !== 'connected') {
                     setState('down', 'Database unavailable');
-                } else if (ok && data.status === 'ok' && data.ready === true && data.schema === 'current') {
-                    setState('ok', 'Application ready');
-                } else if (data.schema === 'fingerprint_mismatch') {
-                    setState('down', 'Database schema changed; review required');
-                } else if (data.schema === 'unsupported_dialect') {
-                    setState('down', 'Unsupported database');
+                } else if (data.initialization === 'failed') {
+                    setState('down', 'Database initialization failed');
+                } else if (data.initialization === 'not_run') {
+                    setState('down', 'Database connected');
+                } else if (ok && data.status === 'ok' && data.initialization === 'initialized') {
+                    setState('ok', 'Database connected · Startup initialization completed');
                 } else {
-                    setState('down', 'Database schema requires migration');
+                    setState('down', 'Database setup incomplete');
                 }
             })
             .catch(() => setState('down', 'Status unavailable'));

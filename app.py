@@ -6,10 +6,8 @@ from datetime import datetime, timezone
 from functools import wraps
 from dotenv import load_dotenv
 from secrets import token_urlsafe
-from types import SimpleNamespace
 from hmac import compare_digest
 from zoneinfo import ZoneInfo
-from sqlalchemy import and_, or_, inspect as sqlalchemy_inspect
 from database_config import environment_database_url
 from workflow_routing import (
     CATEGORY_DEPARTMENTS,
@@ -35,29 +33,14 @@ from assignment_audit_models import (
     application_tables_excluding_audit,
     register_assignment_audit_models,
 )
-from migration_runner import LATEST_REQUIRED_VERSION, schema_fingerprint
 import json
 import os
 
 load_dotenv()
 
-def image_uploads_enabled_from_environment(environ=None):
-    """Require an explicit opt-in before saving uploads to local disk."""
-    environment = os.environ if environ is None else environ
-    if environment.get("VERCEL") == "1":
-        return False
-    configured = environment.get("SPSFRMS_IMAGE_UPLOADS_ENABLED")
-    return bool(configured and configured.strip().lower() in {"1", "true", "yes", "on"})
-
-
 app = Flask(__name__)
 
-secret_key = os.getenv("SECRET_KEY")
-if not secret_key or len(secret_key.strip()) < 32:
-    raise RuntimeError(
-        "SECRET_KEY must be explicitly configured with at least 32 non-whitespace characters."
-    )
-app.config["SECRET_KEY"] = secret_key.strip()
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "spsfrms-local-secret-key")
 
 database_url = environment_database_url()
 if database_url:
@@ -73,14 +56,8 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_recycle": 300,
 }
 app.config["UPLOAD_FOLDER"] = "uploads"
-app.config["IMAGE_UPLOADS_ENABLED"] = image_uploads_enabled_from_environment()
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 app.jinja_env.globals["csrf_token"] = lambda: csrf_token()
-
-
-@app.context_processor
-def inject_image_upload_setting():
-    return {"image_uploads_enabled": app.config["IMAGE_UPLOADS_ENABLED"]}
 
 
 db = SQLAlchemy(app)
@@ -111,8 +88,6 @@ CATEGORIES = [
 STATUSES = ["Submitted", "Under Review", "Assigned", "In Progress", "Resolved"]
 ROLES = {"citizen", "department_head", "staff", "admin"}
 DEPARTMENT_NAMES = sorted(set(CATEGORY_DEPARTMENTS.values()))
-MAX_ACTIVE_STAFF_ASSIGNMENTS = 2
-TERMINAL_ASSIGNMENT_STATUSES = ("Resolved", "Ignored")
 
 
 class User(db.Model):
@@ -122,7 +97,6 @@ class User(db.Model):
     phone = db.Column(db.String(20), nullable=False)
     password = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), default="citizen")
-    is_active = db.Column(db.Boolean, nullable=False, default=True)
     registered_date = db.Column(db.DateTime, default=utcnow)
     department_id = db.Column(db.Integer, db.ForeignKey("department.id", ondelete="SET NULL"))
 
@@ -130,9 +104,6 @@ class User(db.Model):
     department = db.relationship("Department", foreign_keys=[department_id], back_populates="members")
     headed_department = db.relationship("Department", foreign_keys="Department.head_id", back_populates="head", uselist=False)
     assigned_complaints = db.relationship("Complaint", back_populates="assigned_staff", foreign_keys="Complaint.assigned_staff_id")
-    department_assignments = db.relationship(
-        "ComplaintDepartment", back_populates="assigned_staff", foreign_keys="ComplaintDepartment.assigned_staff_id"
-    )
 
 
 def find_user_by_email(email):
@@ -160,30 +131,15 @@ class Department(db.Model):
 
 class ComplaintDepartment(db.Model):
     __tablename__ = "complaint_department"
-    __table_args__ = (
-        db.UniqueConstraint("complaint_id", "department_id", name="uq_complaint_department"),
-        db.CheckConstraint(
-            "status IN ('Submitted', 'Under Review', 'Assigned', 'In Progress', 'Resolved', 'Ignored')",
-            name="ck_cd_status",
-        ),
-    )
+    __table_args__ = (db.UniqueConstraint("complaint_id", "department_id", name="uq_complaint_department"),)
 
     id = db.Column(db.Integer, primary_key=True)
     complaint_id = db.Column(db.Integer, db.ForeignKey("complaint.id", ondelete="CASCADE"), nullable=False)
     department_id = db.Column(db.Integer, db.ForeignKey("department.id", ondelete="CASCADE"), nullable=False)
     assigned_date = db.Column(db.DateTime, default=utcnow)
-    assigned_staff_id = db.Column(
-        db.Integer, db.ForeignKey("user.id", ondelete="RESTRICT", name="fk_cd_assigned_staff"), index=True
-    )
-    assigned_by = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="SET NULL", name="fk_cd_assigned_by"))
-    staff_assigned_date = db.Column(db.DateTime)
-    status = db.Column(db.String(30), nullable=False, default="Submitted")
-    resolution_note = db.Column(db.Text)
 
     complaint = db.relationship("Complaint", back_populates="department_assignments")
     department = db.relationship("Department")
-    assigned_staff = db.relationship("User", back_populates="department_assignments", foreign_keys=[assigned_staff_id])
-    assigner = db.relationship("User", foreign_keys=[assigned_by])
 
 
 class Complaint(db.Model):
@@ -217,9 +173,6 @@ class Complaint(db.Model):
 class ComplaintAssignment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     complaint_id = db.Column(db.Integer, db.ForeignKey("complaint.id", ondelete="CASCADE"), nullable=False, index=True)
-    department_id = db.Column(
-        db.Integer, db.ForeignKey("department.id", ondelete="RESTRICT", name="fk_ca_department"), index=True
-    )
     staff_id = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="RESTRICT"), nullable=False, index=True)
     assigned_by = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="RESTRICT"))
     assigned_date = db.Column(db.DateTime, nullable=False, default=utcnow)
@@ -228,15 +181,11 @@ class ComplaintAssignment(db.Model):
     complaint = db.relationship("Complaint", back_populates="assignment_history")
     staff = db.relationship("User", foreign_keys=[staff_id])
     assigner = db.relationship("User", foreign_keys=[assigned_by])
-    department = db.relationship("Department")
 
 
 class ComplaintStatusHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     complaint_id = db.Column(db.Integer, db.ForeignKey("complaint.id", ondelete="CASCADE"), nullable=False, index=True)
-    department_id = db.Column(
-        db.Integer, db.ForeignKey("department.id", ondelete="RESTRICT", name="fk_csh_department"), index=True
-    )
     old_status = db.Column(db.String(30))
     new_status = db.Column(db.String(30), nullable=False)
     updated_by = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="SET NULL"))
@@ -245,7 +194,6 @@ class ComplaintStatusHistory(db.Model):
 
     complaint = db.relationship("Complaint", back_populates="status_history")
     updater = db.relationship("User")
-    department = db.relationship("Department")
 
 
 def allowed_file(filename):
@@ -413,309 +361,6 @@ def department_can_manage_complaint(department, complaint):
     return department_can_view_complaint(department, complaint)
 
 
-def complaint_department_states(complaint):
-    """Return one display/state row per linked department, including legacy primary rows."""
-    records = {row.department_id: row for row in complaint.department_assignments}
-    department_ids = set(records)
-    if complaint.department_id:
-        department_ids.add(complaint.department_id)
-    departments = Department.query.filter(Department.id.in_(department_ids)).all() if department_ids else []
-    states = []
-    for department in sorted(departments, key=lambda row: row.name.casefold()):
-        record = records.get(department.id)
-        if record is not None and department.id == complaint.department_id:
-            # Preserve the legacy current assignee for display without
-            # manufacturing department-specific assignment provenance/time.
-            if record.assigned_staff_id is None and complaint.assigned_staff_id:
-                record.assigned_staff_id = complaint.assigned_staff_id
-                record.assigned_staff = complaint.assigned_staff
-            if record.resolution_note is None:
-                record.resolution_note = complaint.resolution_note
-        if record is None:
-            is_primary = department.id == complaint.department_id
-            assigned_staff_id = complaint.assigned_staff_id if is_primary else None
-            record_status = complaint.status if is_primary else "Submitted"
-            record = SimpleNamespace(
-                complaint_id=complaint.id,
-                department_id=department.id,
-                assigned_staff_id=assigned_staff_id,
-                assigned_staff=complaint.assigned_staff if is_primary else None,
-                assigned_by=None,
-                staff_assigned_date=None,
-                status=record_status,
-                resolution_note=complaint.resolution_note if is_primary else None,
-            )
-            if assigned_staff_id:
-                latest_assignment = next(
-                    (event for event in reversed(complaint.assignment_history)
-                     if event.staff_id == assigned_staff_id
-                     and event.department_id in (None, department.id)),
-                    None,
-                )
-                if latest_assignment:
-                    record.staff_assigned_date = latest_assignment.assigned_date
-                    record.assigned_by = latest_assignment.assigned_by
-        record.department = department
-        states.append(record)
-    return states
-
-
-def overall_department_status(complaint, department_states=None):
-    """Summarize department work without reporting completion while any work remains."""
-    if complaint.status == "Ignored":
-        return "Ignored"
-    states = [row.status for row in (department_states or complaint_department_states(complaint))]
-    if not states:
-        return complaint.status
-    if all(status == "Resolved" for status in states):
-        return "Resolved"
-    for status in ("In Progress", "Assigned", "Under Review", "Submitted"):
-        if status in states:
-            return status
-    return complaint.status
-
-
-def active_department_staff(department_id):
-    if not department_id:
-        return []
-    return User.query.filter_by(
-        role="staff", department_id=department_id, is_active=True,
-    ).order_by(User.name).all()
-
-
-def dashboard_workload_staff_ids(complaints, staff_by_department):
-    """Include current assignees in workload summaries even if now inactive."""
-    staff_ids = {
-        staff.id
-        for staff_list in (staff_by_department or {}).values()
-        for staff in staff_list
-    }
-    for complaint in complaints:
-        if complaint.assigned_staff_id is not None:
-            staff_ids.add(complaint.assigned_staff_id)
-        staff_ids.update(
-            state.assigned_staff_id
-            for state in complaint.department_assignments
-            if state.assigned_staff_id is not None
-        )
-    return staff_ids
-
-
-def build_department_assignment_views(complaints, actor, staff_by_department=None,
-                                      staff_workloads=None, recommendations_by_key=None):
-    """Build per-department dashboard rows with permissions derived server-side."""
-    staff_by_department = staff_by_department or {}
-    staff_workloads = staff_workloads or {}
-    recommendations_by_key = recommendations_by_key or {}
-    views_by_complaint = {}
-    overall_status_by_complaint = {}
-    for complaint in complaints:
-        states = complaint_department_states(complaint)
-        overall_status_by_complaint[complaint.id] = overall_department_status(complaint, states)
-        views = []
-        for state in states:
-            department_id = state.department_id
-            is_linked = department_id == complaint.department_id or any(
-                row.department_id == department_id for row in complaint.department_assignments
-            )
-            may_manage = False
-            if is_linked:
-                if normalize_role(actor.role) == "admin":
-                    may_manage = True
-                elif (normalize_role(actor.role) == "department_head"
-                      and actor.department_id == department_id):
-                    may_manage = True
-            if normalize_role(actor.role) == "staff" and state.assigned_staff_id != actor.id:
-                continue
-            views.append(SimpleNamespace(
-                department=state.department,
-                department_id=department_id,
-                status=state.status,
-                assigned_staff=state.assigned_staff,
-                assigned_staff_id=state.assigned_staff_id,
-                staff_assigned_date=state.staff_assigned_date,
-                resolution_note=state.resolution_note,
-                can_manage=may_manage,
-                staff_options=staff_by_department.get(department_id, []),
-                has_available_staff=any(
-                    staff_workloads.get(staff.id, 0) < MAX_ACTIVE_STAFF_ASSIGNMENTS
-                    or staff.id == state.assigned_staff_id
-                    for staff in staff_by_department.get(department_id, [])
-                ),
-                has_additional_staff_capacity=any(
-                    staff_workloads.get(staff.id, 0) < MAX_ACTIVE_STAFF_ASSIGNMENTS
-                    for staff in staff_by_department.get(department_id, [])
-                ),
-                max_active_assignments=MAX_ACTIVE_STAFF_ASSIGNMENTS,
-                recommendation=recommendations_by_key.get((complaint.id, department_id)),
-                workload_by_staff=staff_workloads,
-            ))
-        views_by_complaint[complaint.id] = views
-    return views_by_complaint, overall_status_by_complaint
-
-
-def get_department_assignment(complaint, department_id, create=False):
-    """Fetch or compatibility-materialize the state row for a linked department."""
-    department = db.session.get(Department, department_id) if department_id else None
-    if not department:
-        return None
-    linked = department.id == complaint.department_id or ComplaintDepartment.query.filter_by(
-        complaint_id=complaint.id, department_id=department.id,
-    ).first() is not None
-    if not linked:
-        return None
-    assignment = ComplaintDepartment.query.filter_by(
-        complaint_id=complaint.id, department_id=department.id,
-    ).first()
-    if assignment or not create:
-        return assignment
-    assignment = ComplaintDepartment(
-        complaint_id=complaint.id,
-        department_id=department.id,
-        status=complaint.status if department.id == complaint.department_id else "Submitted",
-    )
-    if department.id == complaint.department_id:
-        assignment.assigned_staff_id = complaint.assigned_staff_id
-        assignment.resolution_note = complaint.resolution_note
-        if complaint.assigned_staff_id:
-            latest = next(
-                (event for event in reversed(complaint.assignment_history)
-                 if event.staff_id == complaint.assigned_staff_id
-                 and event.department_id in (None, department.id)),
-                None,
-            )
-            if latest:
-                assignment.staff_assigned_date = latest.assigned_date
-                assignment.assigned_by = latest.assigned_by
-    db.session.add(assignment)
-    return assignment
-
-
-def get_locked_complaint_or_404(complaint_id):
-    """Lock the complaint row before a workflow mutation to serialize its state."""
-    complaint = db.session.execute(
-        db.select(Complaint)
-        .where(Complaint.id == complaint_id)
-        .with_for_update()
-    ).scalar_one_or_none()
-    if complaint is None:
-        abort(404)
-    return complaint
-
-
-def active_assignment_workloads(staff_ids):
-    """Count active department work plus unmaterialized legacy primary assignments once.
-
-    Resolved and Ignored are terminal. A complaint-level legacy assignee is
-    counted only when no corresponding primary-department row has an assignee.
-    Ignored complaints do not consume active workload while they are paused.
-    """
-    staff_ids = set(staff_ids or [])
-    workloads = {staff_id: 0 for staff_id in staff_ids}
-    if not staff_ids:
-        return workloads
-
-    active_department_status = or_(
-        ComplaintDepartment.status.is_(None),
-        ComplaintDepartment.status.notin_(TERMINAL_ASSIGNMENT_STATUSES),
-    )
-    department_counts = db.session.query(
-        ComplaintDepartment.assigned_staff_id, db.func.count(ComplaintDepartment.id)
-    ).join(Complaint, Complaint.id == ComplaintDepartment.complaint_id).filter(
-        ComplaintDepartment.assigned_staff_id.in_(staff_ids),
-        active_department_status,
-        or_(Complaint.status.is_(None), Complaint.status != "Ignored"),
-    ).group_by(ComplaintDepartment.assigned_staff_id).all()
-    for staff_id, count in department_counts:
-        workloads[staff_id] += count
-
-    legacy_has_assigned_department_row = Complaint.department_assignments.any(and_(
-        ComplaintDepartment.department_id == Complaint.department_id,
-        ComplaintDepartment.assigned_staff_id.isnot(None),
-    ))
-    active_complaint_status = or_(
-        Complaint.status.is_(None),
-        Complaint.status.notin_(TERMINAL_ASSIGNMENT_STATUSES),
-    )
-    legacy_counts = db.session.query(
-        Complaint.assigned_staff_id, db.func.count(Complaint.id)
-    ).filter(
-        Complaint.assigned_staff_id.in_(staff_ids),
-        active_complaint_status,
-        ~legacy_has_assigned_department_row,
-    ).group_by(Complaint.assigned_staff_id).all()
-    for staff_id, count in legacy_counts:
-        workloads[staff_id] += count
-    return workloads
-
-
-def active_assignment_workload(staff_id, *, exclude_complaint_id=None, exclude_department_id=None):
-    """Count one candidate's current workload, optionally excluding the edited row."""
-    workloads = active_assignment_workloads([staff_id])
-    if exclude_complaint_id is None or exclude_department_id is None:
-        return workloads.get(staff_id, 0)
-
-    excluded_department_row = ComplaintDepartment.query.filter_by(
-        complaint_id=exclude_complaint_id,
-        department_id=exclude_department_id,
-        assigned_staff_id=staff_id,
-    ).filter(
-        or_(ComplaintDepartment.status.is_(None),
-            ComplaintDepartment.status.notin_(TERMINAL_ASSIGNMENT_STATUSES))
-    ).first()
-    if excluded_department_row:
-        return max(0, workloads.get(staff_id, 0) - 1)
-
-    excluded_legacy_row = Complaint.query.filter_by(
-        id=exclude_complaint_id, assigned_staff_id=staff_id,
-    ).filter(
-        or_(Complaint.status.is_(None), Complaint.status.notin_(TERMINAL_ASSIGNMENT_STATUSES)),
-        ~Complaint.department_assignments.any(and_(
-            ComplaintDepartment.department_id == Complaint.department_id,
-            ComplaintDepartment.assigned_staff_id.isnot(None),
-        )),
-    ).first()
-    if excluded_legacy_row:
-        return max(0, workloads.get(staff_id, 0) - 1)
-    return workloads.get(staff_id, 0)
-
-
-def lock_assignment_staff_rows(staff_ids):
-    """Serialize workload decisions on staff rows in stable order.
-
-    Under PostgreSQL READ COMMITTED, the workload query after this lock sees
-    commits made by a competing assignment that held the same staff row lock.
-    Other isolation levels fail closed because their snapshot may be stale.
-    """
-    staff_ids = sorted({staff_id for staff_id in staff_ids if staff_id is not None})
-    if db.engine.dialect.name == "postgresql":
-        isolation = db.session.execute(db.text("SHOW transaction_isolation")).scalar_one_or_none()
-        if str(isolation).strip().lower() != "read committed":
-            return None
-    if not staff_ids:
-        return {}
-    rows = db.session.execute(
-        db.select(User)
-        .where(User.id.in_(staff_ids))
-        .order_by(User.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    ).scalars().all()
-    return {row.id: row for row in rows}
-
-
-def staff_has_open_work(staff_id):
-    """Check department state and legacy primary assignments before staff changes."""
-    if ComplaintDepartment.query.filter_by(assigned_staff_id=staff_id) \
-            .filter(or_(ComplaintDepartment.status.is_(None),
-                        ComplaintDepartment.status.notin_(TERMINAL_ASSIGNMENT_STATUSES))) \
-            .first() is not None:
-        return True
-    return Complaint.query.filter_by(assigned_staff_id=staff_id).filter(
-        or_(Complaint.status.is_(None), Complaint.status != "Resolved")
-    ).first() is not None
-
-
 def initialize_database():
     """Create missing tables and apply additive, data-preserving schema changes."""
     with app.app_context():
@@ -743,7 +388,6 @@ def initialize_database():
                     and not ComplaintAssignment.query.filter_by(complaint_id=complaint.id).first()):
                 db.session.add(ComplaintAssignment(
                     complaint_id=complaint.id,
-                    department_id=complaint.department_id,
                     staff_id=complaint.assigned_staff_id,
                     assigned_by=None,
                     assigned_date=complaint.updated_date or complaint.created_date,
@@ -975,17 +619,9 @@ def citizen_dashboard():
     ).order_by(Complaint.created_date.desc()).all()
 
     total = len(complaints)
-    status_by_id = {
-        complaint.id: overall_department_status(complaint)
-        for complaint in complaints
-    }
-    department_states_by_id = {
-        complaint.id: complaint_department_states(complaint)
-        for complaint in complaints
-    }
-    resolved = sum(status_by_id[c.id] == "Resolved" for c in complaints)
-    in_progress = sum(status_by_id[c.id] in ["Under Review", "In Progress"] for c in complaints)
-    submitted = sum(status_by_id[c.id] == "Submitted" for c in complaints)
+    resolved = sum(c.status == "Resolved" for c in complaints)
+    in_progress = sum(c.status in ["Under Review", "In Progress"] for c in complaints)
+    submitted = sum(c.status == "Submitted" for c in complaints)
 
     return render_template(
         "citizen_dashboard.html",
@@ -994,8 +630,6 @@ def citizen_dashboard():
         resolved=resolved,
         in_progress=in_progress,
         submitted=submitted,
-        overall_status_by_id=status_by_id,
-        department_states_by_id=department_states_by_id,
     )
 
 
@@ -1028,12 +662,6 @@ def submit_complaint():
         image_name = None
         file = request.files.get("image")
         if file and file.filename:
-            if not app.config["IMAGE_UPLOADS_ENABLED"]:
-                flash(
-                    "Image uploads are disabled on this deployment. Remove the image and submit the complaint text again.",
-                    "warning",
-                )
-                return render_template("submit_complaint.html", form=request.form)
             if not allowed_file(file.filename):
                 flash("Only JPG, JPEG and PNG images are allowed.", "danger")
                 return render_template("submit_complaint.html", form=request.form)
@@ -1062,7 +690,7 @@ def submit_complaint():
         db.session.flush()
         db.session.add_all([
             ComplaintDepartment(complaint_id=complaint.id, department_id=linked.id)
-            for linked in [department, *secondary_departments]
+            for linked in secondary_departments
         ])
         db.session.add(ComplaintStatusHistory(
             complaint_id=complaint.id,
@@ -1117,31 +745,16 @@ def track_complaint(complaint_id):
         abort(403)
     if normalize_role(user.role) == "department_head" and not department_can_view_complaint(user.department, complaint):
         abort(403)
-    all_department_states = complaint_department_states(complaint)
-    if user.role == "staff" and not any(
-        row.assigned_staff_id == user.id and row.department_id == user.department_id
-        for row in all_department_states
-    ):
+    if user.role == "staff" and complaint.assigned_staff_id != user.id:
         abort(403)
-
-    if user.role == "citizen" or user.role == "admin":
-        visible_department_states = all_department_states
-    elif normalize_role(user.role) == "department_head":
-        visible_department_states = [
-            row for row in all_department_states if row.department_id == user.department_id
-        ]
-    else:
-        visible_department_states = [
-            row for row in all_department_states
-            if row.department_id == user.department_id and row.assigned_staff_id == user.id
-        ]
 
     return render_template(
         "track_complaint.html",
         complaint=complaint,
-        linked_departments=[row.department.name for row in visible_department_states],
-        department_progress=visible_department_states,
-        display_status=overall_department_status(complaint, all_department_states),
+        linked_departments=sorted(
+            {row.department.name for row in complaint.department_assignments if row.department}
+            | ({complaint.department.name} if complaint.department else set())
+        ),
         multi_department_review=complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY,
         status_history=complaint.status_history,
         analysis=analyze_complaint(complaint.complaint_text),
@@ -1164,31 +777,27 @@ def officer_dashboard():
             complaint for complaint in complaints
             if department_can_view_complaint(user.department, complaint)
         ]
-    staff_members = active_department_staff(user.department_id)
-    staff_workloads = active_assignment_workloads(
-        dashboard_workload_staff_ids(
-            complaints, {user.department_id: staff_members} if user.department_id else {},
-        )
-    )
-    staff_with_capacity = [
-        staff for staff in staff_members
-        if staff_workloads.get(staff.id, 0) < MAX_ACTIVE_STAFF_ASSIGNMENTS
-    ]
+    staff_members = User.query.filter_by(role="staff", department_id=user.department_id).order_by(User.name).all() if user.department_id else []
+    staff_workloads = {
+        staff.id: Complaint.query.filter_by(assigned_staff_id=staff.id)
+        .filter(Complaint.status.notin_(["Resolved", "Ignored"]))
+        .count()
+        for staff in staff_members
+    }
     recommendation_artifact = load_model_artifact(
         os.getenv("SPSFRMS_STAFF_MODEL_PATH", "")
     )
-    recommendations_by_key = {
-        (complaint.id, user.department_id): recommend_staff(
+    recommendations_by_id = {
+        complaint.id: recommend_staff(
             complaint.complaint_text,
             complaint.category,
             user.department_id,
-            staff_with_capacity,
+            staff_members,
             staff_workloads,
             recommendation_artifact,
         )
         for complaint in complaints
-        if (user.department and department_can_view_complaint(user.department, complaint)
-            and complaint.category != MULTI_DEPARTMENT_LEGACY_CATEGORY
+        if (department_can_manage_complaint(user.department, complaint)
             and complaint.status in {"Submitted", "Assigned"})
     }
     return render_staff_dashboard(
@@ -1197,10 +806,8 @@ def officer_dashboard():
         can_assign=True,
         department=user.department,
         staff_members=staff_members,
-        staff_by_department={user.department_id: staff_members} if user.department_id else {},
         staff_workloads=staff_workloads,
-        recommendations_by_key=recommendations_by_key,
-        actor=user,
+        recommendations_by_id=recommendations_by_id,
         queue_filter=queue_filter,
         can_manage_by_id={
             complaint.id: department_can_manage_complaint(user.department, complaint)
@@ -1213,28 +820,13 @@ def officer_dashboard():
 @roles_required("staff")
 def staff_dashboard():
     user = current_user()
-    if not user.is_active:
-        abort(403)
-    complaints = Complaint.query.filter(
-        Complaint.status != "Ignored",
-        or_(
-            Complaint.assigned_staff_id == user.id,
-            Complaint.department_assignments.any(and_(
-                ComplaintDepartment.assigned_staff_id == user.id,
-                ComplaintDepartment.status != "Ignored",
-            )),
-        ),
-    ).all()
-    return render_staff_dashboard(
-        complaints, dashboard_role="staff", can_assign=False, department=user.department,
-        actor=user,
-    )
+    complaints = Complaint.query.filter_by(assigned_staff_id=user.id).filter(Complaint.status != "Ignored").all()
+    return render_staff_dashboard(complaints, dashboard_role="staff", can_assign=False, department=user.department)
 
 
 def render_staff_dashboard(complaints, dashboard_role, can_assign, department=None, staff_members=None,
                           staff_workloads=None, queue_filter="active", dashboard_title="Complaint response desk",
-                          can_manage_by_id=None, recommendations_by_id=None, actor=None,
-                          staff_by_department=None, recommendations_by_key=None):
+                          can_manage_by_id=None, recommendations_by_id=None):
     complaints = sorted(complaints, key=priority_order_key)
     analysis_by_id = {c.id: analyze_complaint(c.complaint_text) for c in complaints}
     linked_departments_by_id = {}
@@ -1244,13 +836,9 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
             names.add(complaint.department.name)
         linked_departments_by_id[complaint.id] = sorted(names)
     age_by_id = {c.id: complaint_age_label(c.created_date) for c in complaints}
-    views_by_complaint, overall_status_by_complaint = build_department_assignment_views(
-        complaints, actor or current_user(), staff_by_department,
-        staff_workloads, recommendations_by_key,
-    )
-    new_count = sum(overall_status_by_complaint[c.id] == "Submitted" for c in complaints)
-    in_progress = sum(overall_status_by_complaint[c.id] in ["Under Review", "In Progress"] for c in complaints)
-    resolved = sum(overall_status_by_complaint[c.id] == "Resolved" for c in complaints)
+    new_count = sum(c.status == "Submitted" for c in complaints)
+    in_progress = sum(c.status in ["Under Review", "In Progress"] for c in complaints)
+    resolved = sum(c.status == "Resolved" for c in complaints)
     high_priority = sum(c.priority == "High" for c in complaints)
 
     return render_template(
@@ -1271,8 +859,6 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
         recommendations_by_id=recommendations_by_id or {},
         analysis_by_id=analysis_by_id,
         linked_departments_by_id=linked_departments_by_id,
-        department_assignment_views_by_complaint=views_by_complaint,
-        overall_status_by_complaint=overall_status_by_complaint,
         age_by_id=age_by_id,
         queue_filter=queue_filter,
     )
@@ -1282,31 +868,24 @@ def render_staff_dashboard(complaints, dashboard_role, can_assign, department=No
 @roles_required("staff", "admin")
 def update_status(complaint_id):
     user = current_user()
-    if not valid_csrf_token(request.form.get("csrf_token", "")):
-        abort(400, description="Invalid or missing CSRF token.")
-    complaint = get_locked_complaint_or_404(complaint_id)
-    department_id = request.form.get("department_id", type=int) or complaint.department_id
-    department_assignment = get_department_assignment(complaint, department_id, create=True)
-    if not department_assignment:
+    complaint = db.get_or_404(Complaint, complaint_id)
+    if complaint.category == MULTI_DEPARTMENT_LEGACY_CATEGORY:
         abort(403)
-    if user.role == "staff" and (
-        not user.is_active or department_assignment.assigned_staff_id != user.id
-        or department_assignment.department_id != user.department_id
-    ):
+    if user.role == "staff" and complaint.assigned_staff_id != user.id:
         abort(403)
     if complaint.status == "Ignored":
         flash("This complaint is ignored. Restore it before changing its status.", "warning")
         return _status_redirect(complaint)
     new_status = request.form.get("status")
 
-    if new_status == "In Progress" and department_assignment.status == "In Progress":
-        flash(f"CMP{complaint.id:03d} is already In Progress for {department_assignment.department.name}.", "info")
+    if new_status == "In Progress" and complaint.status == "In Progress":
+        flash(f"CMP{complaint.id:03d} is already In Progress.", "info")
         return _status_redirect(complaint)
 
     starting_statuses = {"Submitted", "Assigned"}
     if not (
-        new_status == "In Progress" and department_assignment.status in starting_statuses
-        or new_status == "Resolved" and department_assignment.status == "In Progress"
+        new_status == "In Progress" and complaint.status in starting_statuses
+        or new_status == "Resolved" and complaint.status == "In Progress"
     ):
         flash("That status change is not available for this complaint.", "warning")
         return _status_redirect(complaint)
@@ -1316,29 +895,20 @@ def update_status(complaint_id):
         flash("Add a resolution note before marking this complaint resolved.", "danger")
         return _status_redirect(complaint)
 
-    old_status = department_assignment.status
-    department_assignment.status = new_status
-    if department_assignment.department_id == complaint.department_id:
-        complaint.resolution_note = remarks if new_status == "Resolved" else complaint.resolution_note
+    old_status = complaint.status
+    complaint.status = new_status
     if new_status == "Resolved":
-        department_assignment.resolution_note = remarks
+        complaint.resolution_note = remarks
     db.session.add(ComplaintStatusHistory(
         complaint_id=complaint.id,
-        department_id=department_assignment.department_id,
         old_status=old_status,
         new_status=new_status,
         updated_by=user.id,
         timestamp=utcnow(),
         remarks=remarks or None,
     ))
-    complaint.status = overall_department_status(
-        complaint,
-        [row for row in complaint_department_states(complaint)
-         if row.department_id != department_assignment.department_id]
-        + [department_assignment],
-    )
     db.session.commit()
-    flash(f"{department_assignment.department.name} status for CMP{complaint.id:03d} updated to {new_status}.", "success")
+    flash(f"CMP{complaint.id:03d} status updated to {new_status}.", "success")
 
     return _status_redirect(complaint)
 
@@ -1380,28 +950,11 @@ def admin_dashboard():
 @roles_required("admin")
 def admin_complaints():
     complaints = Complaint.query.order_by(Complaint.created_date.desc()).all()
-    department_ids = {
-        department_id
-        for complaint in complaints
-        for department_id in (
-            [complaint.department_id] + [row.department_id for row in complaint.department_assignments]
-        )
-        if department_id
-    }
-    staff_by_department = {
-        department_id: active_department_staff(department_id)
-        for department_id in department_ids
-    }
-    staff_ids = dashboard_workload_staff_ids(complaints, staff_by_department)
-    staff_workloads = active_assignment_workloads(staff_ids)
     return render_staff_dashboard(
         complaints,
         dashboard_role="administrator",
-        can_assign=True,
+        can_assign=False,
         dashboard_title="All complaints",
-        actor=current_user(),
-        staff_by_department=staff_by_department,
-        staff_workloads=staff_workloads,
     )
 
 
@@ -1490,20 +1043,10 @@ def admin_manage():
         user = db.session.get(User, request.form.get("user_id", type=int))
         role = request.form.get("role", "")
         department = db.session.get(Department, request.form.get("department_id", type=int))
-        if user and (user.role == "staff" or role == "staff"):
-            locked_staff = lock_assignment_staff_rows([user.id])
-            if locked_staff is None:
-                db.session.rollback()
-                flash("Staff eligibility cannot be safely updated under the current database isolation level.", "danger")
-                return redirect(url_for("admin_dashboard"))
-            user = locked_staff.get(user.id)
         if not user or role not in ROLES or (role in {"department_head", "staff"} and not department):
             flash("Select a valid account, role, and department.", "danger")
         elif role == "department_head" and department.head_id not in (None, user.id):
             flash("This department already has a department head.", "warning")
-        elif (user.role == "staff" and (role != "staff" or user.department_id != department.id)
-              and staff_has_open_work(user.id)):
-            flash("Reassign this staff member's active department work before changing their role or department.", "warning")
         else:
             if user.headed_department:
                 user.headed_department.head_id = None
@@ -1515,127 +1058,63 @@ def admin_manage():
             flash(f"{user.name}'s role and department were updated.", "success")
         return redirect(url_for("admin_dashboard"))
 
-    if action == "set_staff_active":
-        if not valid_csrf_token(request.form.get("csrf_token", "")):
-            abort(400, description="Invalid or missing CSRF token.")
-        user = db.session.get(User, request.form.get("user_id", type=int))
-        if user and user.role == "staff":
-            locked_staff = lock_assignment_staff_rows([user.id])
-            if locked_staff is None:
-                db.session.rollback()
-                flash("Staff eligibility cannot be safely updated under the current database isolation level.", "danger")
-                return redirect(url_for("admin_dashboard"))
-            user = locked_staff.get(user.id)
-        active_value = request.form.get("is_active")
-        if not user or user.role != "staff" or active_value not in {"true", "false"}:
-            flash("Select a valid staff account and active-state action.", "danger")
-        elif active_value == "false" and staff_has_open_work(user.id):
-            flash("Reassign this staff member's active department work before deactivating the account.", "warning")
-        else:
-            user.is_active = active_value == "true"
-            db.session.commit()
-            flash(f"Staff account {'activated' if user.is_active else 'deactivated'}.", "success")
-        return redirect(url_for("admin_dashboard"))
-
     flash("Choose a valid account-management action.", "warning")
     return redirect(url_for("admin_dashboard"))
 
 
 @app.route("/assign-complaint/<int:complaint_id>", methods=["POST"])
-@roles_required("department_head", "admin")
+@roles_required("department_head")
 def assign_complaint(complaint_id):
-    actor = current_user()
+    head = current_user()
     if not valid_csrf_token(request.form.get("csrf_token", "")):
         abort(400, description="Invalid or missing CSRF token.")
-    complaint = get_locked_complaint_or_404(complaint_id)
-    department_id = request.form.get("department_id", type=int) or complaint.department_id
-    department = db.session.get(Department, department_id) if department_id else None
-    if not department:
+    complaint = db.get_or_404(Complaint, complaint_id)
+    if not department_can_manage_complaint(head.department, complaint):
         abort(403)
-    if normalize_role(actor.role) == "department_head" and actor.department_id != department.id:
-        abort(403)
-    department_assignment = get_department_assignment(complaint, department.id, create=True)
-    if not department_assignment:
-        abort(403)
-    if department_assignment.status == "Resolved":
-        flash(f"Resolved {department.name} work cannot be assigned or reassigned.", "warning")
-        return redirect_by_role()
+    if complaint.status == "Resolved":
+        flash("Resolved complaints cannot be assigned or reassigned.", "warning")
+        return redirect(url_for("officer_dashboard"))
     if complaint.status == "Ignored":
         flash("Restore this complaint before assigning staff.", "warning")
-        return redirect_by_role()
-    if department_assignment.status not in {"Submitted", "Assigned"}:
-        flash("Staff can only be assigned before this department starts work.", "warning")
-        return redirect_by_role()
+        return redirect(url_for("officer_dashboard", queue="ignored"))
+    if complaint.status not in {"Submitted", "Assigned"}:
+        flash("Staff can only be assigned before work starts.", "warning")
+        return redirect(url_for("officer_dashboard"))
 
     staff_id = request.form.get("staff_id", type=int)
-    previous_staff_id = department_assignment.assigned_staff_id
-    locked_staff = lock_assignment_staff_rows([previous_staff_id, staff_id])
-    if locked_staff is None:
-        db.session.rollback()
-        flash("Assignments cannot be safely changed under the current database isolation level. Please retry.", "danger")
-        return redirect_by_role()
-    staff = locked_staff.get(staff_id) if staff_id is not None else None
+    staff = db.session.get(User, staff_id) if staff_id is not None else None
     if not staff:
         flash("Select an available staff account.", "danger")
-        return redirect_by_role()
-    if staff.role != "staff" or not staff.is_active or staff.department_id != department.id:
+        return redirect(url_for("officer_dashboard"))
+    if staff.role != "staff" or staff.department_id != head.department_id:
         abort(403)
 
-    if department_assignment.status == "Assigned" and department_assignment.assigned_staff_id == staff.id:
+    if complaint.status == "Assigned" and complaint.assigned_staff_id == staff.id:
         flash(f"CMP{complaint.id:03d} is already assigned to {staff.name}.", "info")
-        return redirect_by_role()
+        return redirect(url_for("officer_dashboard"))
 
-    workload = active_assignment_workload(
-        staff.id,
-        exclude_complaint_id=complaint.id,
-        exclude_department_id=department.id,
-    )
-    if workload >= MAX_ACTIVE_STAFF_ASSIGNMENTS:
-        db.session.rollback()
-        flash(
-            f"This staff member already has {workload} active assignments. "
-            "Please select another eligible staff member.",
-            "warning",
-        )
-        return redirect_by_role()
-
-    previous_status = department_assignment.status
-    assigned_at = utcnow()
-    department_assignment.assigned_staff_id = staff.id
-    department_assignment.assigned_by = actor.id
-    department_assignment.staff_assigned_date = assigned_at
-    department_assignment.status = "Assigned"
-    department_assignment.resolution_note = None
-    if department.id == complaint.department_id:
-        complaint.assigned_staff_id = staff.id
-        complaint.resolution_note = None
+    previous_status = complaint.status
+    complaint.assigned_staff_id = staff.id
+    complaint.status = "Assigned"
+    complaint.resolution_note = None
     db.session.add(ComplaintAssignment(
         complaint_id=complaint.id,
-        department_id=department.id,
         staff_id=staff.id,
-        assigned_by=actor.id,
-        assigned_date=assigned_at,
+        assigned_by=head.id,
         remarks=request.form.get("remarks", "").strip() or None,
     ))
     if previous_status != "Assigned":
         db.session.add(ComplaintStatusHistory(
             complaint_id=complaint.id,
-            department_id=department.id,
             old_status=previous_status,
             new_status="Assigned",
-            updated_by=actor.id,
-            timestamp=assigned_at,
+            updated_by=head.id,
+            timestamp=utcnow(),
             remarks=request.form.get("remarks", "").strip() or f"Assigned to {staff.name}.",
         ))
-    complaint.status = overall_department_status(
-        complaint,
-        [row for row in complaint_department_states(complaint)
-         if row.department_id != department.id]
-        + [department_assignment],
-    )
     db.session.commit()
-    flash(f"{department.name} assignment for CMP{complaint.id:03d} set to {staff.name}.", "success")
-    return redirect_by_role()
+    flash(f"CMP{complaint.id:03d} assigned to {staff.name}.", "success")
+    return redirect(url_for("officer_dashboard"))
 
 
 @app.route("/ignore-complaint/<int:complaint_id>", methods=["POST"])
@@ -1644,7 +1123,7 @@ def ignore_complaint(complaint_id):
     head = current_user()
     if not valid_csrf_token(request.form.get("csrf_token", "")):
         abort(400, description="Invalid or missing CSRF token.")
-    complaint = get_locked_complaint_or_404(complaint_id)
+    complaint = db.get_or_404(Complaint, complaint_id)
     if not department_can_manage_complaint(head.department, complaint):
         abort(403)
     if complaint.status not in {"Submitted", "Under Review", "Assigned", "In Progress"}:
@@ -1675,7 +1154,7 @@ def restore_complaint(complaint_id):
     head = current_user()
     if not valid_csrf_token(request.form.get("csrf_token", "")):
         abort(400, description="Invalid or missing CSRF token.")
-    complaint = get_locked_complaint_or_404(complaint_id)
+    complaint = db.get_or_404(Complaint, complaint_id)
     if not department_can_manage_complaint(head.department, complaint):
         abort(403)
     if complaint.status != "Ignored":
@@ -1690,57 +1169,6 @@ def restore_complaint(complaint_id):
         if ignored_event and ignored_event.old_status in valid_restore_statuses
         else "Submitted"
     )
-
-    # Restoring an ignored complaint makes its existing assignments active
-    # again. Serialize on every affected staff row before checking capacity.
-    department_states = ComplaintDepartment.query.filter_by(complaint_id=complaint.id).all()
-    returning_work = {}
-    required_departments = {}
-    for state in department_states:
-        if (state.assigned_staff_id is not None
-                and (state.status is None or state.status not in TERMINAL_ASSIGNMENT_STATUSES)):
-            staff_id = state.assigned_staff_id
-            returning_work[staff_id] = returning_work.get(staff_id, 0) + 1
-            required_departments.setdefault(staff_id, set()).add(state.department_id)
-
-    primary_has_department_assignee = any(
-        state.department_id == complaint.department_id and state.assigned_staff_id is not None
-        for state in department_states
-    )
-    if complaint.assigned_staff_id is not None and not primary_has_department_assignee:
-        if complaint.department_id is None:
-            db.session.rollback()
-            flash("This legacy assignment has no department and cannot be safely restored.", "danger")
-            return redirect(url_for("officer_dashboard"))
-        staff_id = complaint.assigned_staff_id
-        returning_work[staff_id] = returning_work.get(staff_id, 0) + 1
-        required_departments.setdefault(staff_id, set()).add(complaint.department_id)
-
-    locked_staff = lock_assignment_staff_rows(returning_work)
-    if locked_staff is None:
-        db.session.rollback()
-        flash("This complaint cannot be safely restored under the current database isolation level.", "danger")
-        return redirect(url_for("officer_dashboard"))
-    for staff_id, department_ids in required_departments.items():
-        staff = locked_staff.get(staff_id)
-        if (len(department_ids) != 1 or not staff or staff.role != "staff"
-                or not staff.is_active or staff.department_id not in department_ids):
-            db.session.rollback()
-            flash("This complaint cannot be restored until its assigned staff eligibility is valid.", "danger")
-            return redirect(url_for("officer_dashboard"))
-    current_work = active_assignment_workloads(returning_work)
-    if any(
-        current_work.get(staff_id, 0) + returning_count > MAX_ACTIVE_STAFF_ASSIGNMENTS
-        for staff_id, returning_count in returning_work.items()
-    ):
-        db.session.rollback()
-        flash(
-            "This complaint cannot be restored because one or more assigned staff members are at capacity. "
-            "Free capacity or reassign the affected work before restoring it.",
-            "warning",
-        )
-        return redirect(url_for("officer_dashboard"))
-
     complaint.status = restored_status
     db.session.add(ComplaintStatusHistory(
         complaint_id=complaint.id,
@@ -1755,97 +1183,22 @@ def restore_complaint(complaint_id):
     return redirect(url_for("officer_dashboard"))
 
 
-def inspect_database_schema_readiness():
-    """Return schema state and version without creating or changing objects."""
-    if db.engine.dialect.name != "postgresql":
-        return "unsupported_dialect", None
-
-    inspector = sqlalchemy_inspect(db.engine)
-    actual_tables = set(inspector.get_table_names())
-    application_tables = application_tables_excluding_audit(db.metadata)
-    missing_tables = [table.name for table in application_tables if table.name not in actual_tables]
-    for table in application_tables:
-        if table.name not in actual_tables:
-            continue
-        actual_columns = {column["name"] for column in inspector.get_columns(table.name)}
-        if any(column.name not in actual_columns for column in table.columns):
-            return "missing_required_objects", None
-    if missing_tables:
-        return "missing_required_objects", None
-
-    raw_connection = db.engine.raw_connection()
-    try:
-        with raw_connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT version, schema_fingerprint "
-                "FROM public.spsfrms_schema_migration ORDER BY version DESC LIMIT 1"
-            )
-            migration_row = cursor.fetchone()
-        if migration_row is None:
-            return "unversioned", None
-        current_fingerprint = schema_fingerprint(raw_connection)
-    finally:
-        try:
-            raw_connection.rollback()
-        finally:
-            raw_connection.close()
-
-    version, recorded_fingerprint = migration_row
-    if version != LATEST_REQUIRED_VERSION:
-        return "migration_required", version
-    if recorded_fingerprint.strip() != current_fingerprint:
-        return "fingerprint_mismatch", version
-    return "current", version
-
-
 @app.route("/health")
 def health():
+    initialization = app.config.get("DATABASE_INITIALIZATION_STATE", "not_run")
     try:
         db.session.execute(db.text("SELECT 1"))
-    except Exception as health_error:
-        app.logger.error("Database health check failed (%s).", type(health_error).__name__)
+    except Exception as error:
+        app.logger.error("Database health check failed (%s).", type(error).__name__)
         return {
             "status": "error",
-            "process": "running",
-            "database": "unavailable",
-            "schema": "unknown",
-            "ready": False,
+            "database": "not connected",
+            "initialization": initialization,
         }, 503
 
-    try:
-        schema_state, migration_version = inspect_database_schema_readiness()
-    except Exception as health_error:
-        app.logger.error("Schema readiness check failed (%s).", type(health_error).__name__)
-        return {
-            "status": "degraded",
-            "process": "running",
-            "database": "connected",
-            "schema": "unknown",
-            "ready": False,
-        }, 503
-
-    if schema_state == "current":
-        return {
-            "status": "ok",
-            "process": "running",
-            "database": "connected",
-            "schema": "current",
-            "migration_version": migration_version,
-            "ready": True,
-        }, 200
-    return {
-        "status": "degraded",
-        "process": "running",
-        "database": "connected",
-        "schema": schema_state,
-        "ready": False,
-    }, 503
-
-
-@app.route("/livez")
-def livez():
-    """Report process liveness without requiring database availability."""
-    return {"process": "running"}, 200
+    if initialization == "initialized":
+        return {"status": "ok", "database": "connected", "initialization": initialization}, 200
+    return {"status": "degraded", "database": "connected", "initialization": initialization}, 503
 
 
 def startup_database_mode():

@@ -147,7 +147,7 @@
                                     <td>{{ account.name }}<small class="cell-sub">{{ account.email }}</small></td>
                                     <td colspan="3">
                                         <form method="POST" action="{{ url_for('admin_manage') }}" class="d-flex flex-wrap gap-2">
-                                            <input type="hidden" name="action" value="assign_user"><input type="hidden" name="user_id" value="{{ account.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                            <input type="hidden" name="action" value="assign_user"><input type="hidden" name="user_id" value="{{ account.id }}">
                                             <select name="role" class="form-select form-select-sm" aria-label="Role for {{ account.name }}">
                                                 {% for role in ['citizen','department_head','staff','admin'] %}<option value="{{ role }}" {% if account.role == role %}selected{% endif %}>{{ role|replace('_',' ')|title }}</option>{% endfor %}
                                             </select>
@@ -157,9 +157,6 @@
                                             </select>
                                             <button class="btn btn-outline-subtle btn-sm" type="submit">Save</button>
                                         </form>
-                                        {% if account.role == 'staff' %}
-                                        <div class="d-flex align-items-center gap-2 mt-2"><small class="text-muted-2">{{ 'Active' if account.is_active else 'Inactive' }}</small><form method="POST" action="{{ url_for('admin_manage') }}"><input type="hidden" name="action" value="set_staff_active"><input type="hidden" name="user_id" value="{{ account.id }}"><input type="hidden" name="is_active" value="{{ 'false' if account.is_active else 'true' }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-subtle btn-sm" type="submit">{{ 'Deactivate' if account.is_active else 'Activate' }}</button></form></div>
-                                        {% endif %}
                                     </td>
                                 </tr>
                             {% endfor %}

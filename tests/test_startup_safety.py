@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from initialize_disposable_database import main
@@ -24,7 +25,6 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.engine import Engine
 
 os.environ["DATABASE_URL"] = "sqlite://"
-os.environ["SECRET_KEY"] = "synthetic-startup-test-key-for-isolated-tests"
 os.environ["SPSFRMS_STARTUP_MODE"] = "initialize"
 with patch.object(dotenv, "load_dotenv", return_value=False), \
      patch.object(SQLAlchemy, "create_all", side_effect=AssertionError("create_all called")) as create_all, \
@@ -57,82 +57,47 @@ with patch.object(dotenv, "load_dotenv", return_value=False), \
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_import_fails_closed_when_secret_key_is_missing_or_weak(self):
-        import_check = r"""
-import dotenv
-from unittest.mock import patch
-try:
-    with patch.object(dotenv, "load_dotenv", return_value=False):
-        import app
-except RuntimeError as error:
-    assert str(error) == "SECRET_KEY must be explicitly configured with at least 32 non-whitespace characters."
-else:
-    raise AssertionError("app imported without a sufficiently strong SECRET_KEY")
-"""
-        for secret_value in (None, "weak-test-key"):
-            safe_environment = {
-                key: os.environ[key]
-                for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "TEMP", "TMP")
-                if key in os.environ
-            }
-            safe_environment.update({
-                "DATABASE_URL": "sqlite://",
-                "PYTHONPATH": str(PROJECT_ROOT),
-                "PYTHONDONTWRITEBYTECODE": "1",
-            })
-            if secret_value is not None:
-                safe_environment["SECRET_KEY"] = secret_value
-            result = subprocess.run(
-                [sys.executable, "-c", import_check],
-                cwd=PROJECT_ROOT,
-                env=safe_environment,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_setup_requires_flag_before_running_migrations(self):
-        migration_runner = Mock()
+    def test_setup_requires_flag_before_importing_application(self):
+        app_loader = Mock()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(
                 [],
                 environ={"SPSFRMS_DISPOSABLE_DATABASE_URL": DISPOSABLE_URL},
-                migration_main=migration_runner,
+                app_loader=app_loader,
             )
         self.assertEqual(result, 2)
-        migration_runner.assert_not_called()
+        app_loader.assert_not_called()
 
     def test_setup_does_not_fall_back_to_database_url(self):
-        migration_runner = Mock()
+        app_loader = Mock()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(
                 ["--confirm-disposable-database"],
                 environ={"DATABASE_URL": "postgresql+psycopg://remote.invalid/project"},
                 input_fn=lambda _prompt: "INITIALIZE",
-                migration_main=migration_runner,
+                app_loader=app_loader,
             )
         self.assertEqual(result, 2)
-        migration_runner.assert_not_called()
+        app_loader.assert_not_called()
         self.assertNotIn("remote.invalid", output.getvalue())
 
-    def test_setup_requires_typed_confirmation_before_running_migrations(self):
-        migration_runner = Mock()
+    def test_setup_requires_typed_confirmation_before_importing_application(self):
+        app_loader = Mock()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(
                 ["--confirm-disposable-database"],
                 environ={"SPSFRMS_DISPOSABLE_DATABASE_URL": DISPOSABLE_URL},
                 input_fn=lambda _prompt: "CANCEL",
-                migration_main=migration_runner,
+                app_loader=app_loader,
             )
         self.assertEqual(result, 2)
-        migration_runner.assert_not_called()
+        app_loader.assert_not_called()
 
-    def test_setup_rejects_non_loopback_database_without_running_migrations(self):
-        migration_runner = Mock()
+    def test_setup_rejects_non_loopback_database_without_importing_application(self):
+        app_loader = Mock()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(
@@ -142,53 +107,53 @@ else:
                         "postgresql+psycopg://example.invalid/spsfrms_disposable",
                 },
                 input_fn=lambda _prompt: "INITIALIZE",
-                migration_main=migration_runner,
+                app_loader=app_loader,
             )
         self.assertEqual(result, 2)
-        migration_runner.assert_not_called()
+        app_loader.assert_not_called()
 
-    def test_setup_delegates_to_versioned_runner_after_confirmations(self):
-        migration_runner = Mock(side_effect=lambda _argv, **kwargs: (
-            0 if kwargs["input_fn"]("confirmation") ==
-            "APPLY MIGRATIONS disposable-local spsfrms_disposable" else 2
-        ))
+    def test_setup_calls_only_initializer_after_both_confirmations(self):
+        initialize = Mock()
+        fake_app = SimpleNamespace(
+            initialize_database=initialize,
+            db=SimpleNamespace(session=SimpleNamespace(rollback=Mock())),
+        )
+        app_loader = Mock(return_value=fake_app)
         environment = {
             "SPSFRMS_DISPOSABLE_DATABASE_URL": DISPOSABLE_URL,
             "DATABASE_URL": "postgresql+psycopg://old.invalid/ignored",
         }
-        answers = iter(("INITIALIZE", "APPLY MIGRATIONS disposable-local spsfrms_disposable"))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(
                 ["--confirm-disposable-database"],
                 environ=environment,
-                input_fn=lambda _prompt: next(answers),
-                migration_main=migration_runner,
+                input_fn=lambda _prompt: "INITIALIZE",
+                app_loader=app_loader,
             )
         self.assertEqual(result, 0)
-        migration_runner.assert_called_once()
-        self.assertEqual(migration_runner.call_args.args[0], [
-            "--apply", "--target", "disposable-local",
-            "--expected-database-name", "spsfrms_disposable",
-        ])
-        self.assertEqual(
-            migration_runner.call_args.kwargs["environ"]["SPSFRMS_MIGRATION_DATABASE_URL"],
-            DISPOSABLE_URL,
-        )
-        self.assertEqual(environment["DATABASE_URL"], "postgresql+psycopg://old.invalid/ignored")
+        self.assertEqual(environment["DATABASE_URL"], DISPOSABLE_URL)
+        app_loader.assert_called_once_with()
+        initialize.assert_called_once_with()
         self.assertNotIn("old.invalid", output.getvalue())
         self.assertNotIn(DISPOSABLE_URL, output.getvalue())
 
     def test_setup_failure_is_reported_without_raw_exception_details(self):
+        rollback = Mock()
+        fake_app = SimpleNamespace(
+            initialize_database=Mock(side_effect=RuntimeError("private connection detail")),
+            db=SimpleNamespace(session=SimpleNamespace(rollback=rollback)),
+        )
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = main(
                 ["--confirm-disposable-database"],
                 environ={"SPSFRMS_DISPOSABLE_DATABASE_URL": DISPOSABLE_URL},
                 input_fn=lambda _prompt: "INITIALIZE",
-                migration_main=Mock(side_effect=RuntimeError("private connection detail")),
+                app_loader=lambda: fake_app,
             )
         self.assertEqual(result, 1)
+        rollback.assert_called_once_with()
         self.assertNotIn("private connection detail", output.getvalue())
 
 

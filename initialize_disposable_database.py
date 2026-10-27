@@ -1,10 +1,13 @@
-"""Compatibility entry point for explicitly migrating local disposable PostgreSQL.
+"""Explicitly initialize a local disposable SPSFRMS PostgreSQL database.
 
-The command does not import the Flask application or call ``db.create_all``.
-It delegates to the versioned migration runner after explicit confirmation.
+This command is deliberately separate from importing ``app``. It requires a
+local PostgreSQL URL through SPSFRMS_DISPOSABLE_DATABASE_URL, an explicit CLI
+flag, and an interactive confirmation before importing the application or
+calling its existing initializer. It never creates demo users or seed data.
 """
 
 import argparse
+import importlib
 import os
 import sys
 
@@ -32,8 +35,8 @@ def validate_disposable_database_url(database_url):
     return database_url
 
 
-def main(argv=None, *, environ=None, input_fn=input, migration_main=None):
-    """Run versioned migrations on a loopback database after confirmation."""
+def main(argv=None, *, environ=None, input_fn=input, app_loader=None):
+    """Run the existing initializer after two explicit operator confirmations."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--confirm-disposable-database",
@@ -68,26 +71,28 @@ def main(argv=None, *, environ=None, input_fn=input, migration_main=None):
         print("Initialization cancelled.")
         return 2
 
+    # Pass only the explicitly supplied disposable URL to app configuration;
+    # never fall back to DATABASE_URL or print either value.
+    environment["DATABASE_URL"] = database_url
+    application = None
     try:
-        from sqlalchemy.engine import make_url
-
-        database_name = make_url(database_url).database
-        runner = migration_main
-        if runner is None:
-            from migration_runner import main as runner
-        migration_environment = dict(environment)
-        migration_environment["SPSFRMS_MIGRATION_DATABASE_URL"] = database_url
-        return runner(
-            [
-                "--apply", "--target", "disposable-local",
-                "--expected-database-name", database_name,
-            ],
-            environ=migration_environment,
-            input_fn=input_fn,
-        )
+        application = (app_loader or (lambda: importlib.import_module("app")))()
+        application.initialize_database()
     except Exception:
-        print("Database migration failed. Details were suppressed.")
+        rollback_failed = False
+        if application is not None:
+            try:
+                application.db.session.rollback()
+            except Exception:
+                rollback_failed = True
+        if rollback_failed:
+            print("Database initialization failed and rollback could not be confirmed.")
+        else:
+            print("Database initialization failed. Details were suppressed to protect connection data.")
         return 1
+
+    print("Database initialization completed.")
+    return 0
 
 
 if __name__ == "__main__":
