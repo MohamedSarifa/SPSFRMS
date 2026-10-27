@@ -4,6 +4,7 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
+    healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -11,6 +12,10 @@ services:
           property: connectionString
       - key: SECRET_KEY
         generateValue: true
+      - key: SPSFRMS_STARTUP_MODE
+        value: skip
+      - key: SPSFRMS_SKIP_STARTUP_DB_INIT
+        value: "1"
 
 databases:
   - name: spsfrms-db

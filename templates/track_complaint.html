@@ -5,14 +5,14 @@
 {% set back_url = url_for('citizen_dashboard') if role == 'citizen' else url_for('staff_dashboard') if role == 'staff' else url_for('officer_dashboard') if role in ['officer', 'department_head'] else url_for('admin_dashboard') %}
 {% set states = ["Submitted", "Analyzed", "Assigned", "In Progress", "Resolved"] %}
 {% set status_stage = {"Submitted": 1, "Under Review": 1, "Assigned": 2, "In Progress": 3, "Resolved": 4} %}
-{% set current_index = status_stage.get(complaint.status, 0) %}
+{% set current_index = status_stage.get(display_status, 0) %}
 <div class="page">
     <div class="container">
         <header class="page-head">
             <div>
                 <a href="{{ back_url }}" class="back-link"><i class="bi bi-arrow-left" aria-hidden="true"></i> Back</a>
                 <span class="eyebrow mono">complaint tracking</span>
-                <h1 class="d-flex align-items-center gap-3 flex-wrap"><span class="mono">CMP{{ "%03d"|format(complaint.id) }}</span><span class="status-badge lg {{ complaint.status|lower|replace(' ','-') }}">{{ complaint.status }}</span></h1>
+                <h1 class="d-flex align-items-center gap-3 flex-wrap"><span class="mono">CMP{{ "%03d"|format(complaint.id) }}</span><span class="status-badge lg {{ display_status|lower|replace(' ','-') }}">{{ display_status }}</span></h1>
                 <p>Follow the current response stage and complaint details.</p>
             </div>
         </header>
@@ -20,7 +20,7 @@
         <div class="row g-4">
             <div class="col-lg-8">
                 <section class="panel p-4" aria-labelledby="progressTitle">
-                    {% if complaint.status == 'Ignored' %}<div class="alert alert-warning">This complaint is in the ignored queue. A Department Head can restore it; the complaint and its history are retained.</div>{% else %}
+                    {% if display_status == 'Ignored' %}<div class="alert alert-warning">This complaint is in the ignored queue. A Department Head can restore it; the complaint and its history are retained.</div>{% else %}
                     <div class="d-flex justify-content-between align-items-center mb-4">
                         <h2 id="progressTitle" class="panel-title">Response progress</h2>
                         <span class="count-chip mono">{{ current_index + 1 }}/{{ states|length }}</span>
@@ -49,7 +49,7 @@
                                 <span class="summary-icon green"><i class="bi bi-arrow-right" aria-hidden="true"></i></span>
                                 <div>
                                     <b>{{ event.old_status or 'New' }} → {{ event.new_status }}</b>
-                                    <small>{{ event.timestamp|kolkata_datetime }}{% if event.remarks %} · {{ event.remarks }}{% endif %}</small>
+                                    <small>{% if event.department %}{{ event.department.name }} · {% endif %}{{ event.timestamp|kolkata_datetime }}{% if event.remarks %} · {{ event.remarks }}{% endif %}</small>
                                 </div>
                             </li>
                             {% endfor %}
@@ -77,24 +77,31 @@
                     <dl class="details">
                         <div><dt>Category</dt><dd>{{ complaint.category }}</dd></div>
                         <div><dt>Priority</dt><dd><span class="priority {{ complaint.priority|lower }}">{{ complaint.priority }}</span></dd></div>
-                        <div><dt>Assigned Department{% if linked_departments|length > 1 %}s{% endif %}</dt><dd>{{ linked_departments|join(', ') if linked_departments else 'Unassigned' }}</dd></div>
-                        <div><dt>Assigned Staff</dt><dd>{{ complaint.assigned_staff.name if complaint.assigned_staff else 'Awaiting assignment' }}</dd></div>
-                        {% if complaint.status == 'Resolved' %}<div><dt>Resolution note</dt><dd>{{ complaint.resolution_note or 'No resolution note provided.' }}</dd></div>{% endif %}
+                        <div class="full"><dt>Department progress</dt><dd>
+                            {% for progress in department_progress %}
+                            <section class="border-bottom py-2">
+                                <strong>{{ progress.department.name }}</strong>
+                                <span class="status-badge {{ progress.status|lower|replace(' ','-') }}">{{ progress.status }}</span>
+                                <small class="d-block">{% if progress.assigned_staff %}Assigned to {{ progress.assigned_staff.name }}{% if progress.staff_assigned_date %} · {{ progress.staff_assigned_date|kolkata_datetime }}{% endif %}{% else %}Awaiting staff assignment{% endif %}</small>
+                                {% if progress.status == 'Resolved' %}<small class="d-block">Resolution note: {{ progress.resolution_note or 'No resolution note provided.' }}</small>{% endif %}
+                            </section>
+                            {% else %}No department assignment is recorded.{% endfor %}
+                        </dd></div>
                         <div><dt>Location</dt><dd>{{ complaint.location }}</dd></div>
                         <div><dt>Submitted</dt><dd class="mono">{{ complaint.created_date|kolkata_datetime }}</dd></div>
                         {% if role != 'citizen' %}<div><dt>Citizen</dt><dd>{{ complaint.citizen.name }}</dd></div>{% endif %}
                         <div><dt>Photo</dt><dd>{{ 'Attached' if complaint.image else 'None' }}</dd></div>
                     </dl>
                     <div class="analysis-explanation mt-3">
-                        {% if multi_department_review %}<p class="small text-warning"><strong>Manual review required:</strong> this legacy category is read-only because the current workflow supports one department owner, assignee, and status.</p>{% endif %}
+                        {% if multi_department_review %}<p class="small text-warning"><strong>Legacy routing:</strong> progress and assignment actions are department-specific for explicitly linked departments. Only authorized users for a linked department can manage its work.</p>{% endif %}
                         <p class="small mb-1"><strong>Classification explanation:</strong> {{ analysis.reason }}</p>
                         {% if analysis.needs_review %}<p class="small text-warning mb-0">This routing is provisional and needs human review.</p>{% endif %}
                     </div>
 
-                    {% if role == 'staff' and not multi_department_review and complaint.assigned_staff_id == session.get('user_id') and complaint.status in ['Submitted', 'Assigned'] %}
-                    <form method="POST" action="{{ url_for('update_status', complaint_id=complaint.id) }}" class="mt-4"><input type="hidden" name="status" value="In Progress"><input type="hidden" name="return_to" value="track"><button type="submit" class="btn btn-outline-subtle w-100">Start Work</button></form>
-                    {% elif role == 'staff' and not multi_department_review and complaint.assigned_staff_id == session.get('user_id') and complaint.status == 'In Progress' %}
-                    <form method="POST" action="{{ url_for('update_status', complaint_id=complaint.id) }}" class="mt-4"><label class="form-label" for="resolutionNote">Resolution note</label><textarea class="form-control mb-2" id="resolutionNote" name="remarks" rows="3" placeholder="Describe the completed work" required></textarea><input type="hidden" name="status" value="Resolved"><input type="hidden" name="return_to" value="track"><button type="submit" class="btn btn-accent w-100">Mark as Resolved</button></form>
+                    {% if role == 'staff' and department_progress and department_progress[0].assigned_staff_id == session.get('user_id') and department_progress[0].status in ['Submitted', 'Assigned'] %}
+                    <form method="POST" action="{{ url_for('update_status', complaint_id=complaint.id) }}" class="mt-4"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="department_id" value="{{ department_progress[0].department_id }}"><input type="hidden" name="status" value="In Progress"><input type="hidden" name="return_to" value="track"><button type="submit" class="btn btn-outline-subtle w-100">Start Work</button></form>
+                    {% elif role == 'staff' and department_progress and department_progress[0].assigned_staff_id == session.get('user_id') and department_progress[0].status == 'In Progress' %}
+                    <form method="POST" action="{{ url_for('update_status', complaint_id=complaint.id) }}" class="mt-4"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label class="form-label" for="resolutionNote">Resolution note</label><textarea class="form-control mb-2" id="resolutionNote" name="remarks" rows="3" placeholder="Describe the completed work" required></textarea><input type="hidden" name="department_id" value="{{ department_progress[0].department_id }}"><input type="hidden" name="status" value="Resolved"><input type="hidden" name="return_to" value="track"><button type="submit" class="btn btn-accent w-100">Mark as Resolved</button></form>
                     {% endif %}
                 </aside>
             </div>

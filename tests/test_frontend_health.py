@@ -38,14 +38,14 @@ async function render(script, payload, httpOk) {
 (async () => {
     const script = fs.readFileSync(process.argv[1], 'utf8');
     const cases = [
-        [{ database: 'connected', initialization: 'not_run', status: 'degraded' }, false,
-            'Database connected'],
-        [{ database: 'not connected', initialization: 'not_run', status: 'error' }, false,
+        [{ process: 'running', database: 'connected', schema: 'current', ready: true, status: 'ok' }, true,
+            'Application ready'],
+        [{ process: 'running', database: 'unavailable', schema: 'unknown', ready: false, status: 'error' }, false,
             'Database unavailable'],
-        [{ database: 'connected', initialization: 'failed', status: 'degraded' }, false,
-            'Database initialization failed'],
-        [{ database: 'connected', initialization: 'initialized', status: 'ok' }, true,
-            'Database connected · Startup initialization completed'],
+        [{ process: 'running', database: 'connected', schema: 'fingerprint_mismatch', ready: false, status: 'degraded' }, false,
+            'Database schema changed; review required'],
+        [{ process: 'running', database: 'connected', schema: 'migration_required', ready: false, status: 'degraded' }, false,
+            'Database schema requires migration'],
     ];
     for (const [payload, httpOk, expected] of cases) {
         const actual = await render(script, payload, httpOk);

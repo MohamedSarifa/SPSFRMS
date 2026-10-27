@@ -13,6 +13,7 @@ from unittest.mock import patch
 os.environ["SPSFRMS_SKIP_STARTUP_DB_INIT"] = "1"
 os.environ["SPSFRMS_STARTUP_MODE"] = "skip"
 os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["SECRET_KEY"] = "synthetic-workflow-test-key-for-isolated-tests"
 
 from app import (  # noqa: E402
     CATEGORY_DEPARTMENTS,
@@ -23,10 +24,13 @@ from app import (  # noqa: E402
     ComplaintStatusHistory,
     Department,
     User,
+    active_assignment_workload,
+    active_assignment_workloads,
     analyze_complaint,
     app,
     db,
     format_kolkata_datetime,
+    image_uploads_enabled_from_environment,
     priority_order_key,
     run_startup_database_setup,
     utcnow,
@@ -58,8 +62,11 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
         app.config.update(
             TESTING=True,
             SQLALCHEMY_DATABASE_URI="sqlite://",
+            # Keep the in-memory SQLite database on one connection for the
+            # full suite; recycling drops its schema after the app's 300s TTL.
+            SQLALCHEMY_ENGINE_OPTIONS={"pool_recycle": -1},
             WTF_CSRF_ENABLED=False,
-            SECRET_KEY="workflow-test-key",
+            SECRET_KEY="workflow-test-key-for-isolated-tests",
         )
         with app.app_context():
             if db.engine.dialect.name != "sqlite":
@@ -142,6 +149,11 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
                 status=status, citizen_id=self.ids["citizen"], department_id=self.ids["drainage"],
                 assigned_staff_id=assigned_staff_id, created_date=created_date or utcnow(),
             )
+            complaint.department_assignments.append(ComplaintDepartment(
+                department_id=self.ids["drainage"], assigned_staff_id=assigned_staff_id,
+                staff_assigned_date=utcnow() if assigned_staff_id else None,
+                status=status,
+            ))
             db.session.add(complaint)
             db.session.commit()
             return complaint.id
@@ -153,6 +165,9 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
                 priority="Low", status=status, citizen_id=self.ids["citizen"],
                 department_id=self.department_ids["Police"],
             )
+            complaint.department_assignments.append(ComplaintDepartment(
+                department_id=self.department_ids["Police"], status=status,
+            ))
             db.session.add(complaint)
             db.session.commit()
             return complaint.id
@@ -296,39 +311,67 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
         self.login_as("head")
         response = self.client.get("/officer-dashboard")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Assign staff", response.data)
-        self.assertIn(b"active complaint(s)", response.data)
+        self.assertIn(b"Assign for Drainage", response.data)
+        self.assertIn(b"/2 active assignments", response.data)
 
     def test_multiple_departments_is_not_an_active_classification_or_route(self):
         self.assertNotIn("Multiple Departments", CATEGORY_DEPARTMENTS)
         result = analyze_complaint("Multiple departments need to inspect a damaged road.")
         self.assertNotEqual(result["category"], "Multiple Departments")
 
-    def test_multi_department_legacy_record_is_visible_to_linked_heads_but_read_only(self):
+    def test_multi_department_legacy_record_is_manageable_only_by_linked_department_heads(self):
         complaint_id = self.make_multi_department_complaint()
 
         self.login_as("head")
         primary_response = self.client.get("/officer-dashboard")
         self.assertEqual(primary_response.status_code, 200)
         self.assertIn(f"CMP{complaint_id:03d}".encode(), primary_response.data)
-        self.assertIn(b"Read-only: multiple-department legacy record requires review.", primary_response.data)
-        self.assertNotIn(f"assignModal{complaint_id}".encode(), primary_response.data)
+        self.assertIn(b"Staff in Drainage", primary_response.data)
+        self.assertNotIn(b"Staff in Police", primary_response.data)
         self.assertNotIn(f"/ignore-complaint/{complaint_id}".encode(), primary_response.data)
+        cross_department_attempt = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Police"]),
+            "staff_id": str(self.ids["other_staff"]),
+        })
+        self.assertEqual(cross_department_attempt.status_code, 403)
+        primary_assignment = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        })
+        self.assertEqual(primary_assignment.status_code, 302)
 
         self.login_as("other_head")
         linked_response = self.client.get("/officer-dashboard")
         self.assertEqual(linked_response.status_code, 200)
         self.assertIn(f"CMP{complaint_id:03d}".encode(), linked_response.data)
+        self.assertIn(b"Staff in Police", linked_response.data)
+        self.assertNotIn(b"Staff in Drainage", linked_response.data)
+        linked_cross_department_attempt = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        })
+        self.assertEqual(linked_cross_department_attempt.status_code, 403)
+        linked_assignment = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Police"]),
+            "staff_id": str(self.ids["other_staff"]),
+        })
+        self.assertEqual(linked_assignment.status_code, 302)
         tracked = self.client.get(f"/track-complaint/{complaint_id}")
         self.assertEqual(tracked.status_code, 200)
-        self.assertIn(b"Drainage, Police", tracked.data)
-        self.assertIn(b"Manual review required", tracked.data)
+        self.assertIn(b"Police", tracked.data)
+        self.assertNotIn(b"Drainage</strong>", tracked.data)
+        self.assertIn(b"Legacy routing", tracked.data)
 
         self.login_as("unlinked_head")
         self.assertNotIn(f"CMP{complaint_id:03d}".encode(), self.client.get("/officer-dashboard").data)
         self.assertEqual(self.client.get(f"/track-complaint/{complaint_id}").status_code, 403)
+        unlinked_assignment = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Waste Management"]),
+            "staff_id": str(self.ids["unlinked_head"]),
+        })
+        self.assertEqual(unlinked_assignment.status_code, 403)
 
-    def test_linked_secondary_department_can_view_but_not_manage_new_routed_complaint(self):
+    def test_linked_secondary_department_head_can_manage_only_their_own_department(self):
         with app.app_context():
             complaint = Complaint(
                 complaint_text="Drainage overflow with a linked public safety issue",
@@ -347,20 +390,28 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
         dashboard = self.client.get("/officer-dashboard")
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn(f"CMP{complaint_id:03d}".encode(), dashboard.data)
-        self.assertIn(b"Read-only: this linked department is secondary", dashboard.data)
-        self.assertNotIn(f"assignModal{complaint_id}".encode(), dashboard.data)
+        self.assertIn(b"Staff in Police", dashboard.data)
+        self.assertNotIn(b"Staff in Drainage", dashboard.data)
 
-        attempted_assignment = self.client.post(
+        assignment_response = self.client.post(
             f"/assign-complaint/{complaint_id}",
-            data={"csrf_token": "test-csrf", "staff_id": str(self.ids["other_staff"])},
+            data={
+                "csrf_token": "test-csrf", "department_id": str(self.department_ids["Police"]),
+                "staff_id": str(self.ids["other_staff"]),
+            },
         )
-        self.assertEqual(attempted_assignment.status_code, 403)
+        self.assertEqual(assignment_response.status_code, 302)
         with app.app_context():
             complaint = db.session.get(Complaint, complaint_id)
-            self.assertEqual(complaint.status, "Submitted")
+            self.assertEqual(complaint.status, "Assigned")
             self.assertIsNone(complaint.assigned_staff_id)
+            linked_assignment = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.department_ids["Police"],
+            ).one()
+            self.assertEqual(linked_assignment.assigned_staff_id, self.ids["other_staff"])
+            self.assertEqual(linked_assignment.status, "Assigned")
 
-    def test_multi_department_legacy_actions_are_rejected_without_mutation(self):
+    def test_multi_department_legacy_assignment_is_allowed_but_global_ignore_restore_remain_restricted(self):
         active_id = self.make_multi_department_complaint()
         ignored_id = self.make_multi_department_complaint(status="Ignored")
         with app.app_context():
@@ -373,53 +424,50 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
             before_assignments = ComplaintAssignment.query.count()
 
         self.login_as("head")
+        assignment_response = self.client.post(f"/assign-complaint/{active_id}", data={
+            "department_id": str(self.department_ids["Drainage"]),
+            "staff_id": self.ids["staff"], "csrf_token": "test-csrf",
+        })
         responses = [
-            self.client.post(f"/assign-complaint/{active_id}", data={
-                "staff_id": self.ids["staff"], "csrf_token": "test-csrf",
-            }),
             self.client.post(f"/ignore-complaint/{active_id}", data={
                 "reason": "Attempted action", "csrf_token": "test-csrf",
             }),
             self.client.post(f"/restore-complaint/{ignored_id}", data={"csrf_token": "test-csrf"}),
         ]
+        self.assertEqual(assignment_response.status_code, 302)
         self.assertTrue(all(response.status_code == 403 for response in responses))
         with app.app_context():
-            self.assertEqual(db.session.get(Complaint, active_id).status, "Submitted")
-            self.assertIsNone(db.session.get(Complaint, active_id).assigned_staff_id)
+            self.assertEqual(db.session.get(Complaint, active_id).status, "Assigned")
+            self.assertEqual(db.session.get(Complaint, active_id).assigned_staff_id, self.ids["staff"])
             self.assertEqual(db.session.get(Complaint, ignored_id).status, "Ignored")
-            self.assertEqual(ComplaintStatusHistory.query.count(), before_history)
-            self.assertEqual(ComplaintAssignment.query.count(), before_assignments)
+            self.assertEqual(ComplaintStatusHistory.query.count(), before_history + 1)
+            self.assertEqual(ComplaintAssignment.query.count(), before_assignments + 1)
 
-    def test_multi_department_assigned_staff_cannot_change_global_status(self):
+    def test_multi_department_assigned_staff_changes_only_their_department_status(self):
         complaint_id = self.make_multi_department_complaint(
             status="Assigned", assigned_staff_id=self.ids["staff"],
         )
         self.login_as("staff")
         dashboard = self.client.get("/staff-dashboard")
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn(b"Read-only: multiple-department legacy record requires review.", dashboard.data)
-        self.assertNotIn(b"Start Work", dashboard.data)
+        self.assertIn(b"Start Drainage work", dashboard.data)
         response = self.client.post(f"/update-status/{complaint_id}", data={
+            "department_id": str(self.department_ids["Drainage"]),
             "status": "In Progress", "csrf_token": "test-csrf",
         })
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 302)
         with app.app_context():
             complaint = db.session.get(Complaint, complaint_id)
-            self.assertEqual(complaint.status, "Assigned")
-            self.assertEqual(ComplaintStatusHistory.query.filter_by(complaint_id=complaint_id).count(), 0)
-
-        resolving_id = self.make_multi_department_complaint(
-            status="In Progress", assigned_staff_id=self.ids["staff"],
-        )
-        for account in ("staff", "admin"):
-            self.login_as(account)
-            response = self.client.post(f"/update-status/{resolving_id}", data={
-                "status": "Resolved", "remarks": "Attempted resolution",
-            })
-            self.assertEqual(response.status_code, 403)
-        with app.app_context():
-            self.assertEqual(db.session.get(Complaint, resolving_id).status, "In Progress")
-            self.assertEqual(ComplaintStatusHistory.query.filter_by(complaint_id=resolving_id).count(), 0)
+            self.assertEqual(complaint.status, "In Progress")
+            primary = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.department_ids["Drainage"],
+            ).one()
+            secondary = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.department_ids["Police"],
+            ).one()
+            self.assertEqual(primary.status, "In Progress")
+            self.assertEqual(secondary.status, "Submitted")
+            self.assertEqual(ComplaintStatusHistory.query.filter_by(complaint_id=complaint_id).count(), 1)
 
     def test_multi_department_tracking_denies_unassigned_staff_and_other_citizens(self):
         complaint_id = self.make_multi_department_complaint(assigned_staff_id=self.ids["staff2"])
@@ -666,10 +714,599 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
             self.assertEqual(complaint.category, preview_data["category"])
             self.assertEqual(complaint.department.name, preview_data["department"])
             self.assertEqual(
-                linked_names | {complaint.department.name},
+                linked_names,
                 set(preview_data["departments"]),
             )
-            self.assertNotIn(complaint.department.name, linked_names)
+            self.assertEqual(
+                ComplaintDepartment.query.filter_by(
+                    complaint_id=complaint.id, department_id=complaint.department_id,
+                ).count(),
+                1,
+            )
+
+    def _make_department_wise_fixture(self, category="Drainage"):
+        with app.app_context():
+            water_staff = User(
+                name="Water Assignment Fixture", email="water-fixture@example.test", phone="301",
+                password=generate_password_hash("test-password"), role="staff",
+                department_id=self.department_ids["Water Supply"], is_active=True,
+            )
+            health_staff = User(
+                name="Health Assignment Fixture", email="health-fixture@example.test", phone="302",
+                password=generate_password_hash("test-password"), role="staff",
+                department_id=self.department_ids["Public Health"], is_active=True,
+            )
+            db.session.add_all([water_staff, health_staff])
+            db.session.flush()
+            complaint = Complaint(
+                complaint_text="Sewage and drinking water quality issue",
+                category=category, location="Fixture location", priority="Medium",
+                status="Submitted", citizen_id=self.ids["citizen"],
+                department_id=self.department_ids["Drainage"],
+            )
+            complaint.department_assignments.extend([
+                ComplaintDepartment(department_id=self.department_ids["Drainage"], status="Submitted"),
+                ComplaintDepartment(department_id=self.department_ids["Water Supply"], status="Submitted"),
+                ComplaintDepartment(department_id=self.department_ids["Public Health"], status="Submitted"),
+            ])
+            db.session.add(complaint)
+            db.session.commit()
+            return complaint.id, water_staff.id, health_staff.id
+
+    def test_staff_with_zero_active_assignments_can_receive_first_assignment(self):
+        complaint_id = self.make_complaint()
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 1)
+
+    def test_staff_with_one_active_assignment_can_receive_second(self):
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        complaint_id = self.make_complaint()
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 2)
+
+    def test_staff_with_two_active_assignments_cannot_receive_third(self):
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        complaint_id = self.make_complaint()
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        }, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"already has 2 active assignments", response.data)
+        self.assertIn(b"Please select another eligible staff member", response.data)
+        with app.app_context():
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.ids["drainage"],
+            ).one()
+            self.assertIsNone(state.assigned_staff_id)
+            self.assertEqual(ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count(), 0)
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 2)
+
+    def test_assignment_fails_closed_when_staff_lock_protocol_is_unavailable(self):
+        complaint_id = self.make_complaint()
+        self.login_as("head")
+        with patch("app.lock_assignment_staff_rows", return_value=None):
+            response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+                "staff_id": str(self.ids["staff"]),
+            }, follow_redirects=True)
+        self.assertIn(b"cannot be safely changed under the current database isolation level", response.data)
+        with app.app_context():
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.ids["drainage"],
+            ).one()
+            self.assertIsNone(state.assigned_staff_id)
+            self.assertEqual(ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count(), 0)
+
+    def test_resolved_assignments_do_not_consume_workload_capacity(self):
+        self.make_complaint(status="Resolved", assigned_staff_id=self.ids["staff"])
+        complaint_id = self.make_complaint()
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 1)
+
+    def test_ignored_complaint_pauses_workload_and_restore_reactivates_it(self):
+        complaint_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.login_as("head")
+        ignored = self.client.post(f"/ignore-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "reason": "Synthetic test pause",
+        })
+        self.assertEqual(ignored.status_code, 302)
+        with app.app_context():
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 0)
+        restored = self.client.post(f"/restore-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf",
+        })
+        self.assertEqual(restored.status_code, 302)
+        with app.app_context():
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 1)
+
+    def test_restore_is_blocked_when_reactivation_would_exceed_staff_limit(self):
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        paused_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.login_as("head")
+        ignored = self.client.post(f"/ignore-complaint/{paused_id}", data={
+            "csrf_token": "test-csrf", "reason": "Synthetic test pause",
+        })
+        self.assertEqual(ignored.status_code, 302)
+        with app.app_context():
+            history_count = ComplaintStatusHistory.query.filter_by(complaint_id=paused_id).count()
+        restored = self.client.post(f"/restore-complaint/{paused_id}", data={
+            "csrf_token": "test-csrf",
+        }, follow_redirects=True)
+        self.assertIn(b"one or more assigned staff members are at capacity", restored.data)
+        with app.app_context():
+            complaint = db.session.get(Complaint, paused_id)
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=paused_id, department_id=self.ids["drainage"],
+            ).one()
+            self.assertEqual(complaint.status, "Ignored")
+            self.assertEqual(state.assigned_staff_id, self.ids["staff"])
+            self.assertEqual(ComplaintStatusHistory.query.filter_by(complaint_id=paused_id).count(), history_count)
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 2)
+
+    def test_restore_is_rejected_when_assigned_staff_is_inactive(self):
+        paused_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.login_as("head")
+        ignored = self.client.post(f"/ignore-complaint/{paused_id}", data={
+            "csrf_token": "test-csrf", "reason": "Synthetic test pause",
+        })
+        self.assertEqual(ignored.status_code, 302)
+        with app.app_context():
+            staff = db.session.get(User, self.ids["staff"])
+            staff.is_active = False
+            db.session.commit()
+            history_count = ComplaintStatusHistory.query.filter_by(complaint_id=paused_id).count()
+
+        restored = self.client.post(f"/restore-complaint/{paused_id}", data={
+            "csrf_token": "test-csrf",
+        }, follow_redirects=True)
+        self.assertIn(b"cannot be restored until its assigned staff eligibility is valid", restored.data)
+        with app.app_context():
+            complaint = db.session.get(Complaint, paused_id)
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=paused_id, department_id=self.ids["drainage"],
+            ).one()
+            self.assertEqual(complaint.status, "Ignored")
+            self.assertEqual(state.status, "Assigned")
+            self.assertEqual(state.assigned_staff_id, self.ids["staff"])
+            self.assertEqual(ComplaintStatusHistory.query.filter_by(complaint_id=paused_id).count(), history_count)
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 0)
+
+    def test_same_staff_reassignment_does_not_double_count_current_department(self):
+        existing_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        with app.app_context():
+            self.assertEqual(
+                active_assignment_workload(
+                    self.ids["staff"], exclude_complaint_id=existing_id,
+                    exclude_department_id=self.ids["drainage"],
+                ),
+                1,
+            )
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{existing_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        }, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"is already assigned", response.data)
+
+    def test_reassignment_to_full_staff_is_rejected_without_changing_history(self):
+        complaint_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff2"])
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        with app.app_context():
+            before_history = ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count()
+        self.login_as("admin")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.ids["drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        }, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"already has 2 active assignments", response.data)
+        with app.app_context():
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.ids["drainage"],
+            ).one()
+            self.assertEqual(state.assigned_staff_id, self.ids["staff2"])
+            self.assertEqual(ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count(), before_history)
+
+    def test_legacy_primary_assignee_is_not_double_counted_with_department_row(self):
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        with app.app_context():
+            self.assertEqual(active_assignment_workloads([self.ids["staff"]])[self.ids["staff"]], 1)
+
+    def test_assignment_dropdown_shows_and_disables_at_capacity_candidate(self):
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.make_complaint()
+        self.login_as("admin")
+        response = self.client.get("/admin/complaints")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Test Staff | 2/2 active assignments", response.data)
+        self.assertIn(b"disabled>Test Staff | 2/2 active assignments", response.data)
+
+    def test_admin_can_assign_distinct_active_staff_to_each_department(self):
+        complaint_id, water_staff_id, health_staff_id = self._make_department_wise_fixture()
+        self.login_as("admin")
+        targets = [
+            (self.department_ids["Drainage"], self.ids["staff"]),
+            (self.department_ids["Water Supply"], water_staff_id),
+            (self.department_ids["Public Health"], health_staff_id),
+        ]
+        for department_id, staff_id in targets:
+            response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(department_id), "staff_id": str(staff_id),
+            })
+            self.assertEqual(response.status_code, 302)
+        admin_dashboard = self.client.get("/admin/complaints")
+        self.assertEqual(admin_dashboard.status_code, 200)
+        for department_name in ("Drainage", "Water Supply", "Public Health"):
+            self.assertIn(f"Staff in {department_name}".encode(), admin_dashboard.data)
+        with app.app_context():
+            states = ComplaintDepartment.query.filter_by(complaint_id=complaint_id).all()
+            self.assertEqual({(row.department_id, row.assigned_staff_id) for row in states}, set(targets))
+            events = ComplaintAssignment.query.filter_by(complaint_id=complaint_id).all()
+            self.assertEqual({(row.department_id, row.staff_id) for row in events}, set(targets))
+            self.assertEqual(len({row.department_id for row in events}), 3)
+            workloads = active_assignment_workloads([staff_id for _, staff_id in targets])
+            self.assertEqual([workloads[staff_id] for _, staff_id in targets], [1, 1, 1])
+
+    def test_capacity_limit_applies_to_every_linked_department(self):
+        complaint_id, _, _ = self._make_department_wise_fixture()
+        with app.app_context():
+            # Create two active Water Supply assignments for this eligible staff.
+            department_id = self.department_ids["Water Supply"]
+            staff = User(
+                name="Capacity Water Fixture", email="capacity-water@example.test", phone="304",
+                password=generate_password_hash("test-password"), role="staff",
+                department_id=department_id, is_active=True,
+            )
+            db.session.add(staff)
+            db.session.flush()
+            capacity_staff_id = staff.id
+            for index in range(2):
+                complaint = Complaint(
+                    complaint_text=f"Synthetic water workload {index}", category="Water Supply",
+                    location="Fixture location", priority="Low", status="Assigned",
+                    citizen_id=self.ids["citizen"], department_id=department_id,
+                )
+                complaint.department_assignments.append(ComplaintDepartment(
+                    department_id=department_id, assigned_staff_id=capacity_staff_id,
+                    status="Assigned", staff_assigned_date=utcnow(),
+                ))
+                db.session.add(complaint)
+            db.session.commit()
+        self.login_as("admin")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Water Supply"]),
+            "staff_id": str(capacity_staff_id),
+        }, follow_redirects=True)
+        self.assertIn(b"already has 2 active assignments", response.data)
+        with app.app_context():
+            water_state = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.department_ids["Water Supply"],
+            ).one()
+            self.assertIsNone(water_state.assigned_staff_id)
+            self.assertEqual(ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count(), 0)
+
+    def test_legacy_three_department_assignment_reassignment_status_and_tracking_are_independent(self):
+        complaint_id, water_staff_id, health_staff_id = self._make_department_wise_fixture(
+            category="Multiple Departments",
+        )
+        with app.app_context():
+            replacement = User(
+                name="Replacement Water Fixture", email="water-replacement@example.test", phone="303",
+                password=generate_password_hash("test-password"), role="staff",
+                department_id=self.department_ids["Water Supply"], is_active=True,
+            )
+            db.session.add(replacement)
+            db.session.commit()
+            replacement_staff_id = replacement.id
+
+        targets = [
+            ("Drainage", self.ids["staff"]),
+            ("Water Supply", water_staff_id),
+            ("Public Health", health_staff_id),
+        ]
+        self.login_as("admin")
+        for department_name, staff_id in targets:
+            response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+                "csrf_token": "test-csrf",
+                "department_id": str(self.department_ids[department_name]),
+                "staff_id": str(staff_id),
+            })
+            self.assertEqual(response.status_code, 302)
+
+        invalid = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Water Supply"]),
+            "staff_id": str(health_staff_id),
+        })
+        self.assertEqual(invalid.status_code, 403)
+        reassigned = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Water Supply"]),
+            "staff_id": str(replacement_staff_id),
+        })
+        self.assertEqual(reassigned.status_code, 302)
+
+        selected_staff = {
+            "Drainage": self.ids["staff"],
+            "Water Supply": replacement_staff_id,
+            "Public Health": health_staff_id,
+        }
+        for department_name, staff_id in selected_staff.items():
+            department_id = self.department_ids[department_name]
+            start = self.client.post(f"/update-status/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(department_id),
+                "status": "In Progress",
+            })
+            self.assertEqual(start.status_code, 302)
+            resolve = self.client.post(f"/update-status/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(department_id),
+                "status": "Resolved", "remarks": f"{department_name} completed",
+            })
+            self.assertEqual(resolve.status_code, 302)
+            with app.app_context():
+                complaint = db.session.get(Complaint, complaint_id)
+                state = ComplaintDepartment.query.filter_by(
+                    complaint_id=complaint_id, department_id=department_id,
+                ).one()
+                self.assertEqual(state.assigned_staff_id, staff_id)
+                self.assertEqual(state.status, "Resolved")
+                self.assertEqual(state.resolution_note, f"{department_name} completed")
+                if department_name != "Public Health":
+                    self.assertNotEqual(complaint.status, "Resolved")
+                else:
+                    self.assertEqual(complaint.status, "Resolved")
+
+            if department_name == "Drainage":
+                # Citizen tracking must show the first department's completion
+                # without summarizing the whole complaint as resolved.
+                self.login_as("citizen")
+                partial_tracking = self.client.get(f"/track-complaint/{complaint_id}")
+                self.assertEqual(partial_tracking.status_code, 200)
+                self.assertIn(b'class="status-badge lg assigned">Assigned', partial_tracking.data)
+                self.assertIn(b"Drainage completed", partial_tracking.data)
+                self.assertIn(b"Water Supply", partial_tracking.data)
+                self.assertIn(b"Public Health", partial_tracking.data)
+                self.login_as("admin")
+
+        with app.app_context():
+            events = ComplaintAssignment.query.filter_by(complaint_id=complaint_id).all()
+            water_events = [row for row in events if row.department_id == self.department_ids["Water Supply"]]
+            self.assertEqual([row.staff_id for row in water_events], [water_staff_id, replacement_staff_id])
+            self.assertEqual(len(events), 4)
+            states = ComplaintDepartment.query.filter_by(complaint_id=complaint_id).all()
+            self.assertEqual(len(states), 3)
+
+        self.login_as("citizen")
+        tracking = self.client.get(f"/track-complaint/{complaint_id}")
+        self.assertEqual(tracking.status_code, 200)
+        for department_name in ("Drainage", "Water Supply", "Public Health"):
+            self.assertIn(department_name.encode(), tracking.data)
+        self.assertIn(b"Replacement Water Fixture", tracking.data)
+        for department_name in ("Drainage", "Water Supply", "Public Health"):
+            self.assertIn(f"Resolution note: {department_name} completed".encode(), tracking.data)
+        self.assertIn(b'class="status-badge lg resolved">Resolved', tracking.data)
+
+    def test_department_head_cannot_assign_another_department_or_its_staff(self):
+        complaint_id, water_staff_id, _ = self._make_department_wise_fixture()
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Water Supply"]),
+            "staff_id": str(water_staff_id),
+        })
+        self.assertEqual(response.status_code, 403)
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Drainage"]),
+            "staff_id": str(water_staff_id),
+        })
+        self.assertEqual(response.status_code, 403)
+
+    def test_inactive_staff_cannot_be_assigned(self):
+        complaint_id = self.make_complaint()
+        with app.app_context():
+            staff = db.session.get(User, self.ids["staff"])
+            staff.is_active = False
+            db.session.commit()
+        self.login_as("head")
+        response = self.client.post(f"/assign-complaint/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Drainage"]),
+            "staff_id": str(self.ids["staff"]),
+        })
+        self.assertEqual(response.status_code, 403)
+        with app.app_context():
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.department_ids["Drainage"],
+            ).one()
+            self.assertIsNone(state.assigned_staff_id)
+            self.assertEqual(ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count(), 0)
+
+    def test_staff_with_open_department_work_cannot_be_deactivated_or_moved(self):
+        complaint_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        self.login_as("admin")
+        deactivate = self.client.post("/admin/manage", data={
+            "action": "set_staff_active", "csrf_token": "test-csrf",
+            "user_id": str(self.ids["staff"]), "is_active": "false",
+        })
+        move = self.client.post("/admin/manage", data={
+            "action": "assign_user", "user_id": str(self.ids["staff"]),
+            "role": "staff", "department_id": str(self.department_ids["Police"]),
+        })
+        self.assertEqual(deactivate.status_code, 302)
+        self.assertEqual(move.status_code, 302)
+        with app.app_context():
+            staff = db.session.get(User, self.ids["staff"])
+            self.assertTrue(staff.is_active)
+            self.assertEqual(staff.department_id, self.department_ids["Drainage"])
+            state = ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id, department_id=self.department_ids["Drainage"],
+            ).one()
+            self.assertEqual(state.assigned_staff_id, self.ids["staff"])
+
+    def test_legacy_primary_assignment_without_department_state_protects_staff(self):
+        complaint_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
+        with app.app_context():
+            ComplaintDepartment.query.filter_by(
+                complaint_id=complaint_id,
+                department_id=self.department_ids["Drainage"],
+            ).delete()
+            db.session.commit()
+
+        self.login_as("admin")
+        deactivate = self.client.post("/admin/manage", data={
+            "action": "set_staff_active", "csrf_token": "test-csrf",
+            "user_id": str(self.ids["staff"]), "is_active": "false",
+        })
+        move = self.client.post("/admin/manage", data={
+            "action": "assign_user", "user_id": str(self.ids["staff"]),
+            "role": "staff", "department_id": str(self.department_ids["Police"]),
+        })
+        self.assertEqual(deactivate.status_code, 302)
+        self.assertEqual(move.status_code, 302)
+        with app.app_context():
+            staff = db.session.get(User, self.ids["staff"])
+            complaint = db.session.get(Complaint, complaint_id)
+            self.assertTrue(staff.is_active)
+            self.assertEqual(staff.department_id, self.department_ids["Drainage"])
+            self.assertEqual(complaint.assigned_staff_id, staff.id)
+
+    def test_migrated_legacy_primary_state_keeps_direct_assignee_without_invented_time(self):
+        with app.app_context():
+            complaint = Complaint(
+                complaint_text="Legacy assignment state", category="Drainage",
+                location="Fixture location", priority="Low", status="Assigned",
+                citizen_id=self.ids["citizen"], department_id=self.department_ids["Drainage"],
+                assigned_staff_id=self.ids["staff"],
+            )
+            complaint.department_assignments.append(ComplaintDepartment(
+                department_id=self.department_ids["Drainage"], status="Assigned",
+            ))
+            db.session.add(complaint)
+            db.session.commit()
+            complaint_id = complaint.id
+        self.login_as("citizen")
+        response = self.client.get(f"/track-complaint/{complaint_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Assigned to Test Staff</small>", response.data)
+
+    def test_department_status_update_does_not_change_other_department_state(self):
+        complaint_id, water_staff_id, _ = self._make_department_wise_fixture()
+        self.login_as("admin")
+        for department_id, staff_id in [
+            (self.department_ids["Drainage"], self.ids["staff"]),
+            (self.department_ids["Water Supply"], water_staff_id),
+        ]:
+            self.client.post(f"/assign-complaint/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(department_id), "staff_id": str(staff_id),
+            })
+        self.login_as("staff")
+        response = self.client.post(f"/update-status/{complaint_id}", data={
+            "csrf_token": "test-csrf", "department_id": str(self.department_ids["Drainage"]),
+            "status": "In Progress",
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            states = {
+                row.department_id: row.status
+                for row in ComplaintDepartment.query.filter_by(complaint_id=complaint_id).all()
+            }
+            self.assertEqual(states[self.department_ids["Drainage"]], "In Progress")
+            self.assertEqual(states[self.department_ids["Water Supply"]], "Assigned")
+            self.assertEqual(states[self.department_ids["Public Health"]], "Submitted")
+            self.assertEqual(db.session.get(Complaint, complaint_id).status, "In Progress")
+
+    def test_staff_dashboard_shows_only_the_staff_members_department_assignment(self):
+        complaint_id, water_staff_id, _ = self._make_department_wise_fixture()
+        self.login_as("admin")
+        for department_id, staff_id in [
+            (self.department_ids["Drainage"], self.ids["staff"]),
+            (self.department_ids["Water Supply"], water_staff_id),
+        ]:
+            self.client.post(f"/assign-complaint/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(department_id), "staff_id": str(staff_id),
+            })
+        self.login_as("staff")
+        with self.client.session_transaction() as state:
+            state.pop("_flashes", None)
+        drainage_dashboard = self.client.get("/staff-dashboard")
+        self.assertEqual(drainage_dashboard.status_code, 200)
+        self.assertIn(f"CMP{complaint_id:03d}".encode(), drainage_dashboard.data)
+        self.assertNotIn(b"Water Assignment Fixture", drainage_dashboard.data)
+        with self.client.session_transaction() as state:
+            state["user_id"] = water_staff_id
+            state["role"] = "staff"
+            state["csrf_token"] = "test-csrf"
+            state.pop("_flashes", None)
+        water_dashboard = self.client.get("/staff-dashboard")
+        self.assertEqual(water_dashboard.status_code, 200)
+        self.assertIn(f"CMP{complaint_id:03d}".encode(), water_dashboard.data)
+        self.assertIn(b"Water Assignment Fixture", water_dashboard.data)
+        self.assertNotIn(b"Assigned: Test Staff", water_dashboard.data)
+
+    def test_citizen_tracking_shows_department_staff_and_assignment_times(self):
+        complaint_id, water_staff_id, health_staff_id = self._make_department_wise_fixture()
+        self.login_as("admin")
+        for department_id, staff_id in [
+            (self.department_ids["Drainage"], self.ids["staff"]),
+            (self.department_ids["Water Supply"], water_staff_id),
+            (self.department_ids["Public Health"], health_staff_id),
+        ]:
+            self.client.post(f"/assign-complaint/{complaint_id}", data={
+                "csrf_token": "test-csrf", "department_id": str(department_id), "staff_id": str(staff_id),
+            })
+        self.login_as("citizen")
+        response = self.client.get(f"/track-complaint/{complaint_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Drainage", response.data)
+        self.assertIn(b"Water Supply", response.data)
+        self.assertIn(b"Public Health", response.data)
+        self.assertIn(b"Test Staff", response.data)
+        self.assertIn(b"Water Assignment Fixture", response.data)
+        self.assertIn(b"Health Assignment Fixture", response.data)
+        self.assertIn(b"Assigned", response.data)
+        with app.app_context():
+            self.assertEqual(ComplaintAssignment.query.filter_by(complaint_id=complaint_id).count(), 3)
+
+    def test_legacy_single_department_complaint_remains_trackable_without_link_row(self):
+        with app.app_context():
+            complaint = Complaint(
+                complaint_text="Legacy single-department complaint",
+                category="Drainage", location="Legacy fixture", priority="Low",
+                status="Assigned", citizen_id=self.ids["citizen"],
+                department_id=self.department_ids["Drainage"],
+                assigned_staff_id=self.ids["staff"],
+            )
+            db.session.add(complaint)
+            db.session.commit()
+            complaint_id = complaint.id
+        self.login_as("citizen")
+        response = self.client.get(f"/track-complaint/{complaint_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Drainage", response.data)
+        self.assertIn(b"Test Staff", response.data)
+        self.assertIn(b"Test Staff", self.client.get("/citizen-dashboard").data)
 
     def test_missing_canonical_department_rejects_before_saving_upload_or_complaint(self):
         self.login_as("citizen")
@@ -705,6 +1342,51 @@ class SPSFRMSWorkflowTests(unittest.TestCase):
             complaint = Complaint.query.order_by(Complaint.id.desc()).first()
             self.assertEqual(complaint.category, "Drainage")
             self.assertEqual(complaint.department.name, "Drainage")
+
+    def test_vercel_disables_local_image_storage_without_blocking_text_complaints(self):
+        self.assertFalse(image_uploads_enabled_from_environment({
+            "VERCEL": "1", "SPSFRMS_IMAGE_UPLOADS_ENABLED": "1",
+        }))
+        self.assertFalse(image_uploads_enabled_from_environment({}))
+        self.assertTrue(image_uploads_enabled_from_environment({
+            "SPSFRMS_IMAGE_UPLOADS_ENABLED": "1",
+        }))
+        self.assertFalse(image_uploads_enabled_from_environment({
+            "SPSFRMS_IMAGE_UPLOADS_ENABLED": "0",
+        }))
+
+        self.login_as("citizen")
+        with tempfile.TemporaryDirectory() as upload_directory:
+            with patch.dict(app.config, {
+                "IMAGE_UPLOADS_ENABLED": False,
+                "UPLOAD_FOLDER": upload_directory,
+            }):
+                form = self.client.get("/submit-complaint")
+                self.assertNotIn(b'name="image"', form.data)
+                self.assertIn(b"Text-only complaint submission is available", form.data)
+
+                with app.app_context():
+                    before = Complaint.query.count()
+                image_response = self.client.post("/submit-complaint", data={
+                    "complaint_text": "A blocked drain is causing waterlogging",
+                    "location": "Synthetic test location",
+                    "image": (BytesIO(b"synthetic image bytes"), "synthetic.jpg"),
+                }, content_type="multipart/form-data")
+                self.assertEqual(image_response.status_code, 200)
+                self.assertIn(b"Image uploads are disabled", image_response.data)
+                with app.app_context():
+                    self.assertEqual(Complaint.query.count(), before)
+                self.assertEqual(os.listdir(upload_directory), [])
+
+                text_response = self.client.post("/submit-complaint", data={
+                    "complaint_text": "A blocked drain is causing waterlogging",
+                    "location": "Synthetic test location",
+                })
+                self.assertEqual(text_response.status_code, 302)
+                with app.app_context():
+                    complaint = Complaint.query.order_by(Complaint.id.desc()).first()
+                    self.assertIsNone(complaint.image)
+                self.assertEqual(os.listdir(upload_directory), [])
 
     def test_submission_rejects_descriptions_longer_than_preview_limit(self):
         self.login_as("citizen")
@@ -1071,18 +1753,19 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
         self.client.get("/")  # Consume the success flash before checking queue contents.
         active = self.client.get("/officer-dashboard?queue=active")
         ignored = self.client.get("/officer-dashboard?queue=ignored")
-        self.assertNotIn(f"CMP{complaint_id:03d}".encode(), active.data)
-        self.assertIn(f"CMP{complaint_id:03d}".encode(), ignored.data)
+        complaint_link = f'href="/track-complaint/{complaint_id}"'.encode()
+        self.assertNotIn(complaint_link, active.data)
+        self.assertIn(complaint_link, ignored.data)
         self.login_as("staff")
         staff_queue = self.client.get("/staff-dashboard")
-        self.assertNotIn(f"CMP{complaint_id:03d}".encode(), staff_queue.data)
+        self.assertNotIn(complaint_link, staff_queue.data)
 
     def test_start_work_and_invalid_transitions_are_safe(self):
         complaint_id = self.make_complaint(status="Assigned", assigned_staff_id=self.ids["staff"])
         self.login_as("staff")
         started_at = datetime(2026, 3, 4, 3, 0)
         with patch("app.utcnow", return_value=started_at):
-            started = self.client.post(f"/update-status/{complaint_id}", data={"status": "In Progress"})
+            started = self.client.post(f"/update-status/{complaint_id}", data={"status": "In Progress", "csrf_token": "test-csrf"})
         self.assertEqual(started.status_code, 302)
         with app.app_context():
             self.assertEqual(db.session.get(Complaint, complaint_id).status, "In Progress")
@@ -1092,7 +1775,7 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
             self.assertEqual(started_event.timestamp, started_at)
         resolved_at = datetime(2026, 3, 4, 8, 15)
         with patch("app.utcnow", return_value=resolved_at):
-            resolved = self.client.post(f"/update-status/{complaint_id}", data={"status": "Resolved", "remarks": "Done"})
+            resolved = self.client.post(f"/update-status/{complaint_id}", data={"status": "Resolved", "remarks": "Done", "csrf_token": "test-csrf"})
         self.assertEqual(resolved.status_code, 302)
         with app.app_context():
             self.assertEqual(db.session.get(Complaint, complaint_id).status, "Resolved")
@@ -1100,7 +1783,7 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
                 complaint_id=complaint_id, new_status="Resolved",
             ).one()
             self.assertEqual(resolved_event.timestamp, resolved_at)
-        stale_start = self.client.post(f"/update-status/{complaint_id}", data={"status": "In Progress"})
+        stale_start = self.client.post(f"/update-status/{complaint_id}", data={"status": "In Progress", "csrf_token": "test-csrf"})
         self.assertEqual(stale_start.status_code, 302)
 
     def test_resolved_complaint_cannot_start_work_again(self):
@@ -1110,7 +1793,7 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
             db.session.commit()
             before = ComplaintStatusHistory.query.filter_by(complaint_id=complaint_id).count()
         self.login_as("staff")
-        response = self.client.post(f"/update-status/{complaint_id}", data={"status": "In Progress"})
+        response = self.client.post(f"/update-status/{complaint_id}", data={"status": "In Progress", "csrf_token": "test-csrf"})
         self.assertEqual(response.status_code, 302)
         with app.app_context():
             self.assertEqual(db.session.get(Complaint, complaint_id).status, "Resolved")
@@ -1522,7 +2205,7 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
         assignment = self.client.post(f"/assign-complaint/{complaint_id}", data={"csrf_token": "test-csrf"})
         self.assertEqual(assignment.status_code, 302)
         self.login_as("staff")
-        invalid_status = self.client.post(f"/update-status/{complaint_id}", data={"status": "Invented"})
+        invalid_status = self.client.post(f"/update-status/{complaint_id}", data={"status": "Invented", "csrf_token": "test-csrf"})
         self.assertEqual(invalid_status.status_code, 302)
 
     def test_health_reports_database_failure_without_exposing_error_details(self):
@@ -1533,8 +2216,10 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
             response = self.client.get("/health")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json()["status"], "error")
-        self.assertEqual(response.get_json()["database"], "not connected")
-        self.assertEqual(response.get_json()["initialization"], "not_run")
+        self.assertEqual(response.get_json()["process"], "running")
+        self.assertEqual(response.get_json()["database"], "unavailable")
+        self.assertEqual(response.get_json()["schema"], "unknown")
+        self.assertFalse(response.get_json()["ready"])
         self.assertNotIn(b"private connection detail", response.data)
 
     def test_startup_skip_option_never_calls_initializer_or_demo_creation(self):
@@ -1548,16 +2233,32 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
         create_demo.assert_not_called()
         self.assertEqual(app.config["DATABASE_INITIALIZATION_STATE"], "not_run")
 
-    def test_health_reports_connected_but_initialization_skipped(self):
-        previous_state = app.config.get("DATABASE_INITIALIZATION_STATE")
-        self.addCleanup(app.config.__setitem__, "DATABASE_INITIALIZATION_STATE", previous_state)
-        app.config["DATABASE_INITIALIZATION_STATE"] = "not_run"
+    def test_health_reports_connected_but_schema_is_not_ready(self):
         with patch.object(db.session, "execute", return_value=None):
             response = self.client.get("/health")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json(), {
-            "status": "degraded", "database": "connected", "initialization": "not_run",
+            "status": "degraded", "process": "running", "database": "connected",
+            "schema": "unsupported_dialect", "ready": False,
         })
+
+    def test_health_requires_current_fingerprinted_schema_before_readiness(self):
+        with (
+            patch.object(db.session, "execute", return_value=None),
+            patch("app.inspect_database_schema_readiness", return_value=("current", "0002")),
+        ):
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "status": "ok", "process": "running", "database": "connected",
+            "schema": "current", "migration_version": "0002", "ready": True,
+        })
+
+    def test_liveness_does_not_depend_on_database(self):
+        with patch.object(db.session, "execute", side_effect=AssertionError("liveness queried DB")):
+            response = self.client.get("/livez")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"process": "running"})
 
     def test_startup_failure_is_distinct_and_health_does_not_claim_success(self):
         previous_state = app.config.get("DATABASE_INITIALIZATION_STATE")
@@ -1580,7 +2281,8 @@ assert not any(name.split('.')[0] in blocked for name in sys.modules)
             response = self.client.get("/health")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json(), {
-            "status": "degraded", "database": "connected", "initialization": "failed",
+            "status": "degraded", "process": "running", "database": "connected",
+            "schema": "unsupported_dialect", "ready": False,
         })
 
     def test_citizen_submission_stores_drainage_department_and_analysis(self):

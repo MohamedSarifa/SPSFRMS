@@ -19,9 +19,12 @@ CREATE DATABASE spsfrms_db;
 Copy `.env.example` to `.env` and set:
 
 DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/spsfrms_db
-SECRET_KEY=your-local-secret
+SECRET_KEY=<unique-random-value-at-least-32-characters>
 
 The application normalizes this URL to use the installed psycopg 3 driver.
+`SECRET_KEY` must be explicitly configured with at least 32 non-whitespace
+characters in every environment. Use a unique cryptographically random value;
+the app fails closed if the value is absent or shorter. It has no built-in key.
 
 Do not upload `.env` to GitHub.
 
@@ -98,9 +101,37 @@ Render provides an internal database URL for services hosted in the same region.
 
 Uploaded images are stored in the local `uploads` folder. Render's default web filesystem is not persistent across deploys/restarts, so this mini project treats image upload as optional. If permanent image storage is required later, add a dedicated object-storage service.
 
-## Health check
+## Vercel deployment notes
 
-Open `/health` after deployment. A successful response reports that the database is connected.
+The Flask entry point is the root `app.py`, which exports the WSGI application
+as `app`; dependencies are listed in `requirements.txt`. Vercel can detect this
+Flask layout. The checked-in `render.yaml` configures Render only and does not
+set Vercel project settings. Configure `DATABASE_URL` and a strong
+`SECRET_KEY` in the Vercel project settings for each required environment, and
+keep startup initialization disabled (`SPSFRMS_STARTUP_MODE=skip` and
+`SPSFRMS_SKIP_STARTUP_DB_INIT=1`). These repository files do not confirm which
+values or database are currently configured in Vercel.
+
+Vercel Functions have a read-only application filesystem. This project has no
+object-storage integration, so local image uploads are disabled by default in
+every environment and are always disabled when Vercel exposes `VERCEL=1`. The
+upload control is hidden and forged image posts are rejected without saving a
+complaint; text-only complaint submission continues to work. On a non-Vercel
+environment with an intentionally persistent local filesystem, an operator
+may explicitly enable local uploads with `SPSFRMS_IMAGE_UPLOADS_ENABLED=1`.
+Do not enable local uploads on Vercel; add an approved object-storage provider
+and secret-managed credentials before enabling persistent image uploads there.
+
+## Health checks
+
+`/livez` reports only that the web process is running and does not contact the
+database. `/health` is the readiness endpoint: it returns success only when
+PostgreSQL is reachable, all application tables and columns are present, the
+latest migration version is recorded, and the schema fingerprint still matches
+the recorded migration. A reachable but unversioned, incomplete, or changed
+schema returns HTTP 503. Neither endpoint initializes, migrates, seeds, or
+changes database data. Render uses `/health`; do not deploy until the intended
+database has passed the migration procedure below.
 
 ## Project flow
 
@@ -119,9 +150,10 @@ The existing status and status-history fields also support Ignore and Restore wi
 ## Database connection and startup behavior
 
 Importing `app.py`, running `python app.py`, and starting `gunicorn app:app` do
-not initialize the database. `/health` reports the connection and initialization
-state; an uninitialized database is reported as degraded. The application expects
-its schema and required department records to have been prepared separately.
+not initialize the database. Render explicitly sets
+`SPSFRMS_STARTUP_MODE=skip` and `SPSFRMS_SKIP_STARTUP_DB_INIT=1`. Database
+schema changes are applied only by the separately invoked, versioned migration
+runner below. No startup seeding, demo-user creation, or history backfill occurs.
 
 For an intentionally selected **local disposable PostgreSQL database only**, set
 `SPSFRMS_DISPOSABLE_DATABASE_URL` using a secure local environment or secret
@@ -130,20 +162,93 @@ Then run this one-off command from the project directory:
 
 `python initialize_disposable_database.py --confirm-disposable-database`
 
-The command accepts only PostgreSQL URLs using a loopback host, asks the operator
-to type `INITIALIZE`, and never prints the URL. The existing initializer can create
-missing application tables and departments, add legacy workflow fields, normalize
-legacy roles, update complaint department links, and add reconstructed assignment
-or status-history snapshots. Review and back up the disposable database first.
-This command does not create demo users or seed data. It is not a migration tool
-for production and must not be pointed at Neon or another live database.
+The compatibility command accepts only PostgreSQL URLs using a loopback host,
+asks for `INITIALIZE`, and then invokes the versioned migration runner for a
+second, database-specific confirmation. It never prints the URL and does not
+import `app.py` or call the legacy startup initializer. The baseline migration
+adds canonical department reference rows but creates no demo users or complaint
+history. This local-only command must not be pointed at Neon or another live
+database.
 
 SQLAlchemy checks pooled connections before use and recycles them periodically.
 Errors from the explicit setup command are reported without printing connection
 strings or raw database exception details. No database setup or migration is
 performed by the test suite; tests use an isolated in-memory SQLite database.
 
-No SLA, complaint priority-source, or staff availability fields exist in the current schema. The application does not infer that a priority was manually approved, and workload recommendations count active assignments only.
+`User.is_active` is the current staff availability switch used for new department assignments; administrators can activate or deactivate staff accounts. Department-specific assignment, status, assignee, assignment-time, and resolution-note fields are stored on `ComplaintDepartment`; `ComplaintAssignment.department_id` and `ComplaintStatusHistory.department_id` identify department-scoped history. The complaint-level assignee and status remain compatibility/summary fields. The application summarizes the complaint as unresolved while any linked department still has work outstanding.
+
+Each staff member may hold at most two active assignments across all linked
+departments. Workload counts current `ComplaintDepartment` assignees whose
+department status is not `Resolved` or `Ignored`; a missing department status
+is conservatively counted as active. An overall `Ignored` complaint is paused
+and does not consume capacity. A complaint-level legacy
+assignee is counted only when no assigned primary-department row already
+represents it. Existing over-capacity assignments are retained; new work is
+blocked until capacity is available. The server checks staff role, active
+account, department, and capacity. Admin and department-head controls show
+`n/2` and disable full candidates where possible. Restoring an ignored complaint
+rechecks the assignments it would reactivate and is blocked if staff eligibility
+is no longer valid or the restored workload would exceed the limit.
+
+On PostgreSQL, assignment requests lock the complaint first and then the old
+and selected staff rows in ascending user-ID order. The workload is checked
+after those locks in a `READ COMMITTED` transaction, so competing assignments
+for the same staff member serialize. Staff role/department/active changes use
+the same staff-row lock. Other transaction isolation levels fail closed. The
+SQLite workflow tests verify counting and route behavior only; they do not
+verify PostgreSQL locking. The opt-in disposable-PostgreSQL suite contains a
+concurrent workload test, but it must be run against a dedicated local test
+database before claiming PostgreSQL concurrency verification.
+
+The versioned migration chain is `migrations/0001_initial_baseline.sql` followed
+by `migrations/0002_department_wise_assignments.sql`. Version 0001 describes the
+pre-0002 application schema and inserts only the canonical department reference
+rows. It creates no users or complaint history. Version 0002 adds department-
+scoped assignment and status fields. It preserves existing assignment and
+status-history rows, creates missing primary-department state rows from the
+complaint's current status, and leaves secondary departments unassigned because
+their past staff and progress cannot be inferred. Existing assignment-history
+rows remain unscoped; no department, actor, or time is inferred for them. The
+migration sets existing accounts inactive so an authorized department owner
+must review and activate current staff. This backfill is not verified
+historical ML evidence.
+
+Apply migrations only to a specifically approved disposable or staging
+PostgreSQL database. Supply its URL through the secret/environment mechanism as
+`SPSFRMS_MIGRATION_DATABASE_URL`; the runner does not fall back to `DATABASE_URL`
+and does not accept a URL as a command-line argument. For example, after
+provisioning a disposable local database named `spsfrms_test_local`, run:
+
+`python migration_runner.py --apply --target disposable-local --expected-database-name spsfrms_test_local`
+
+For an approved staging database, use the same command with `--target staging`
+and its reviewed database name. The runner asks for an exact typed confirmation
+before connecting, verifies the connected database name and PostgreSQL version,
+serializes runners with a PostgreSQL advisory lock, and applies each SQL file
+and its version/checksum/schema fingerprint in one transaction. A changed
+applied checksum, changed tracked schema, missing version, unknown version, or
+nonempty unversioned schema stops the run. Existing unversioned databases are
+not auto-adopted; they require a separately reviewed baseline-adoption plan
+after PostgreSQL inspection. Migration files must be run through this runner;
+they do not contain independent transaction wrappers.
+
+Before any approved staging migration, take and verify a database backup and
+review row counts, foreign-key orphans, duplicate complaint/department links,
+legacy assignments, and the effect of setting current accounts inactive.
+There is no automatic destructive down migration. A failure inside a migration
+rolls that migration back; earlier committed versions remain recorded. Recovery
+is by reviewed forward repair or restore from a verified backup, not by deleting
+the ledger or rerunning altered SQL. The migration runner requires PostgreSQL
+12 or later and the migration role must have privileges to create/alter the
+application tables, indexes, functions, triggers, and version ledger. The
+database operator must decide how to separate migration and runtime privileges.
+
+`initialize_disposable_database.py` is retained as a guarded compatibility
+entry point; it now delegates to the versioned runner rather than calling
+`db.create_all()` or the legacy history backfill. Do not use the former startup
+initializer as a production migration tool.
+
+Assignment and department-status regression tests use the isolated in-memory SQLite fixture. Safe local command from PowerShell: `venv\Scripts\python.exe -m unittest discover -s tests -p test_workflow.py`. This does not apply the PostgreSQL migration or verify PostgreSQL behavior. The opt-in PostgreSQL integration suite is destructive to its target schema and accepts only a loopback database with a dedicated `spsfrms_test_` name plus an explicit confirmation token. Follow `migrations/README.md`; never set it to Neon or a production database.
 
 ## Optional ML staff recommendations
 
